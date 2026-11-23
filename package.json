@@ -3,26 +3,37 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --hostname 127.0.0.1",
     "build": "next build",
-    "start": "next start",
+    "start": "next start --hostname 127.0.0.1",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration": "FGA_TEST_ENGINE=1 playwright test",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e:chrome": "playwright test",
+    "dev:managed": "node scripts/managed.mjs"
   },
   "dependencies": {
     "@openfga/syntax-transformer": "^0.2.2",
     "@xyflow/react": "^12.11.2",
+    "concurrently": "10.0.7",
+    "fp-ts": "2.16.11",
+    "io-ts": "2.2.22",
     "lucide-react": "1.31.0",
     "next": "16.3.1",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.65.1",
     "@types/node": "26.2.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
+    "@vitest/coverage-v8": "4.1.10",
     "eslint": "9.39.2",
     "eslint-config-next": "16.3.1",
+    "jsdom": "31.0.1",
     "typescript": "6.0.3",
     "vitest": "^4.1.10"
   }

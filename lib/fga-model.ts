@@ -1,6 +1,8 @@
-import { transformer, validator } from "@openfga/syntax-transformer";
+import * as t from "io-ts";
 
 import { googleDriveModel } from "@/lib/sample-models";
+import { decode, type ModelContent, rewrite } from "@/lib/workbench-contract";
+import { parseModelContent } from "@/lib/workbench-models";
 
 export type ModelDiagnostic = {
   column: number;
@@ -66,37 +68,11 @@ export type ParseResult = {
   graph: ModelGraph | null;
 };
 
-type Rewrite = {
-  computedUserset?: { relation?: string };
-  difference?: { base?: Rewrite; subtract?: Rewrite };
-  intersection?: { child?: Rewrite[] };
-  this?: Record<string, never>;
-  tupleToUserset?: {
-    computedUserset?: { relation?: string };
-    tupleset?: { relation?: string };
-  };
-  union?: { child?: Rewrite[] };
-};
-
-type RelationMetadata = {
-  directly_related_user_types?: Array<{
-    condition?: string;
-    relation?: string;
-    type: string;
-    wildcard?: Record<string, never>;
-  }>;
-};
-
-type TypeDefinition = {
-  metadata?: { relations?: Record<string, RelationMetadata> } | null;
-  relations?: Record<string, Rewrite>;
-  type: string;
-};
-
-type AuthorizationModel = {
-  schema_version?: string;
-  type_definitions?: TypeDefinition[];
-};
+type Rewrite = t.TypeOf<typeof rewrite>;
+type TypeDefinition = ModelContent["type_definitions"][number];
+type RelationMetadata = NonNullable<TypeDefinition["metadata"]>["relations"] extends infer Relations
+  ? NonNullable<Relations> extends Record<string, infer Metadata> ? Metadata : never
+  : never;
 
 type SourceLocation = {
   expression: string;
@@ -154,16 +130,11 @@ function buildSourceMap(modelText: string): SourceMap {
   return { relations, types };
 }
 
-function diagnosticsFromError(error: unknown): ModelDiagnostic[] {
-  const candidate = error as {
-    errors?: Array<{
-      column?: { start?: number };
-      line?: { start?: number };
-      msg?: string;
-      type?: string;
-    }>;
-    message?: string;
-  };
+/** Decode parser diagnostics while retaining the original source-range convention. */
+function diagnosticsFromError(error: object | null): ModelDiagnostic[] {
+  const position = t.partial({ start: t.number });
+  const diagnostic = t.partial({ column: position, line: position, msg: t.string, type: t.string });
+  const candidate = decode(t.partial({ errors: t.array(diagnostic), message: t.string }), error) ?? {};
 
   if (candidate.errors?.length) {
     return candidate.errors.map((item) => ({
@@ -190,10 +161,14 @@ function relationMetadata(type: TypeDefinition, relation: string) {
   return type.metadata?.relations?.[relation];
 }
 
+/** Validate DSL and project the decoded model onto the graph with source locations.
+ * @param modelText Source DSL.
+ * @returns Graph or parser diagnostics for the source.
+ */
 export function parseAuthorizationModel(modelText: string): ParseResult {
   try {
-    validator.validateDSL(modelText);
-    const model = transformer.transformDSLToJSONObject(modelText) as unknown as AuthorizationModel;
+    const model = parseModelContent(modelText);
+    if (!model) throw new Error("Invalid authorization model.");
     const sourceMap = buildSourceMap(modelText);
     const typeDefinitions = model.type_definitions ?? [];
     const dependencies: GraphDependency[] = [];
@@ -361,7 +336,7 @@ export function parseAuthorizationModel(modelText: string): ParseResult {
       },
     };
   } catch (error) {
-    return { diagnostics: diagnosticsFromError(error), graph: null };
+    return { diagnostics: diagnosticsFromError(typeof error === "object" ? error : null), graph: null };
   }
 }
 

@@ -39,7 +39,8 @@ const initialParseResult = parseAuthorizationModel(defaultModel);
 const modelDraftStorageKey = "fga-lens:model-draft:v1";
 const lastValidModelStorageKey = "fga-lens:last-valid-model:v1";
 
-function LogoMark() {
+/** Draw the local FGA Lens mark for the workbench and standalone editor. */
+export function LogoMark() {
   return (
     <div className="logo-mark" aria-hidden="true">
       <div className="logo-dot logo-dot-a" />
@@ -160,6 +161,7 @@ function highlightModelLine(line: string) {
     });
 }
 
+/** Render syntax highlighting and link selected rules to the editor. */
 function ModelEditor({
   diagnostics,
   graph,
@@ -167,6 +169,8 @@ function ModelEditor({
   onChange,
   onSelectRelation,
   selectedLine,
+  workspace,
+  editor,
 }: {
   diagnostics: ModelDiagnostic[];
   graph: ModelGraph;
@@ -174,11 +178,23 @@ function ModelEditor({
   onChange: (model: string) => void;
   onSelectRelation: (relation: GraphRelation) => void;
   selectedLine?: number;
+  workspace: boolean;
+  editor: React.RefObject<HTMLTextAreaElement | null>;
 }) {
   const [scroll, setScroll] = useState({ left: 0, top: 0 });
   const lines = modelText.split("\n");
   const diagnosticLines = new Set(diagnostics.map((diagnostic) => diagnostic.line));
   const isChanged = modelText !== defaultModel;
+
+  useEffect(() => {
+    if (!selectedLine || !editor.current) return;
+    const textarea = editor.current;
+    const height = Number.parseFloat(window.getComputedStyle(textarea).lineHeight);
+    const position = (selectedLine - 1) * height;
+    if (position < textarea.scrollTop || position + height >= textarea.scrollTop + textarea.clientHeight) {
+      textarea.scrollTo?.({ top: Math.max(0, position - height * 2) });
+    }
+  }, [editor, selectedLine]);
 
   const selectCurrentLine = (textarea: HTMLTextAreaElement) => {
     const line = modelText.slice(0, textarea.selectionStart).split("\n").length;
@@ -187,7 +203,7 @@ function ModelEditor({
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== "Tab") return;
+    if (workspace || event.key !== "Tab") return;
     event.preventDefault();
     const textarea = event.currentTarget;
     const start = textarea.selectionStart;
@@ -219,7 +235,7 @@ function ModelEditor({
         <span className="local-trust-icon"><ShieldCheck size={13} /></span>
         <span>
           <strong>Local processing</strong>
-          <small>Model contents are never uploaded.</small>
+          <small>{workspace ? "Publication sends the saved model to the selected store." : "Model contents are never uploaded."}</small>
         </span>
       </div>
 
@@ -244,6 +260,7 @@ function ModelEditor({
         </pre>
         <textarea
           aria-label="OpenFGA authorization model"
+          ref={editor}
           autoCapitalize="off"
           autoCorrect="off"
           onChange={(event) => onChange(event.target.value)}
@@ -334,7 +351,10 @@ function ExpressionTree({ expression, type }: { expression: GraphExpression; typ
   );
 }
 
-function RelationInspector({ relation, onClose }: { relation: GraphRelation; onClose: () => void }) {
+/** Explain a relation and link back to the corresponding DSL line. */
+function RelationInspector({ relation, onClose, onSource }: {
+  relation: GraphRelation; onClose: () => void; onSource?: (line: number) => void;
+}) {
   const [copied, setCopied] = useState(false);
 
   const copyExpression = async () => {
@@ -361,7 +381,8 @@ function RelationInspector({ relation, onClose }: { relation: GraphRelation; onC
 
         <div className="inspector-expression">
           <div>
-            <span>MODEL · LINE {relation.line}</span>
+            {onSource ? <button type="button" onClick={() => onSource(relation.line)}>Source line {relation.line}</button>
+              : <span>LAST VALID SOURCE · LINE {relation.line}</span>}
             <button onClick={copyExpression}>{copied ? <Check size={12} /> : <Copy size={12} />}{copied ? "Copied" : "Copy"}</button>
           </div>
           <code><em>define {relation.name}:</em> {relation.expression}</code>
@@ -372,7 +393,7 @@ function RelationInspector({ relation, onClose }: { relation: GraphRelation; onC
             <span>Accepts directly</span>
             <div className="subject-chips">
               {relation.directSubjects.map((subject) => (
-                <code key={`${subject.type}-${subject.relation}-${subject.wildcard}`}>
+                <code key={`${subject.type}-${subject.relation}-${subject.wildcard}-${subject.condition}`}>
                   {formatSubject(subject)}{subject.condition ? ` with ${subject.condition}` : ""}
                 </code>
               ))}
@@ -391,37 +412,85 @@ function RelationInspector({ relation, onClose }: { relation: GraphRelation; onC
   );
 }
 
-export function FgaLens() {
-  const [modelText, setModelText] = useState(defaultModel);
-  const [parsed, setParsed] = useState(initialParseResult);
-  const [lastValidGraph, setLastValidGraph] = useState(initialParseResult.graph!);
-  const [lastValidModelText, setLastValidModelText] = useState(defaultModel);
-  const [selectedRelationId, setSelectedRelationId] = useState<string | null>(null);
+/** Render the existing editor and graph with either a file workspace or legacy standalone storage. */
+export function FgaLens({ draft, onDraft, relationId, onRelation }: {
+  draft?: { dsl: string; validDsl: string };
+  /** Save the current input and newest valid source independently. */
+  onDraft?: (dsl: string, validDsl?: string) => void;
+  /** Optional relation selection restored from the file workspace. */
+  relationId?: string;
+  /** Persist relation selection independently of the DSL editor. */
+  onRelation?: (relationId: string) => void;
+} = {}) {
+  const [modelText, setModelText] = useState(draft?.dsl ?? defaultModel);
+  const [parsed, setParsed] = useState(() => draft ? parseAuthorizationModel(draft.dsl) : initialParseResult);
+  const [lastValidGraph, setLastValidGraph] = useState(() => draft
+    ? restoreModelSession(draft.dsl, draft.validDsl).lastValidGraph : initialParseResult.graph!);
+  const [lastValidModelText, setLastValidModelText] = useState(draft?.validDsl ?? defaultModel);
+  const [selectedRelationId, setSelectedRelationId] = useState<string | null>(relationId || null);
   const [graphExpanded, setGraphExpanded] = useState(false);
   const [graphSession, setGraphSession] = useState(0);
   const [draftStorageReady, setDraftStorageReady] = useState(false);
+  const editor = useRef<HTMLTextAreaElement>(null);
+  const graphTrigger = useRef<HTMLElement | SVGElement>(null);
+  const expandedControl = useRef<HTMLButtonElement>(null);
+  const selection = useRef(selectedRelationId);
 
   const graph = parsed.graph ?? lastValidGraph;
   const selectedRelation = graph.types
     .flatMap((type) => type.relations)
     .find((relation) => relation.id === selectedRelationId) ?? null;
-  const selectRelation = useCallback((relation: GraphRelation) => setSelectedRelationId(relation.id), []);
+  /** Keep relation selection stable across graph clicks and duplicate selection events. */
+  const changeRelation = useCallback((id: string | null) => {
+    if (selection.current === id) return;
+    selection.current = id;
+    setSelectedRelationId(id);
+    onRelation?.(id ?? "");
+  }, [onRelation]);
+
+  /** Open details from the graph or editor and preserve the initiating focus. */
+  const selectRelation = useCallback((relation: GraphRelation) => {
+    const focused = document.activeElement;
+    if (selection.current === relation.id) return;
+    if (focused instanceof HTMLElement || focused instanceof SVGElement) graphTrigger.current = focused;
+    changeRelation(relation.id);
+  }, [changeRelation]);
+
+  /** Dismiss the inspector and return keyboard focus to its trigger. */
+  const closeRelation = useCallback(() => {
+    changeRelation(null);
+    window.requestAnimationFrame(() => graphTrigger.current?.focus());
+  }, [changeRelation]);
+
+  /** Focus the editor at a selected source line. */
+  const openSource = (line: number) => {
+    const rows = modelText.split("\n");
+    if (!editor.current || rows[line - 1] === undefined) return;
+    const start = rows.slice(0, line - 1).reduce((offset, row) => offset + row.length + 1, 0);
+    setGraphExpanded(false);
+    window.requestAnimationFrame(() => {
+      editor.current?.focus();
+      editor.current?.setSelectionRange(start, start + rows[line - 1].length);
+    });
+  };
   const updateModel = useCallback((nextModel: string) => {
     const nextResult = parseAuthorizationModel(nextModel);
     setModelText(nextModel);
     setParsed(nextResult);
+    onDraft?.(nextModel, nextResult.graph ? nextModel : undefined);
     if (nextResult.graph) {
       setLastValidGraph(nextResult.graph);
       setLastValidModelText(nextModel);
     }
-  }, []);
+  }, [onDraft]);
   const loadSample = useCallback((sample: SampleModel) => {
-    setSelectedRelationId(null);
+    changeRelation(null);
     setGraphSession((current) => current + 1);
     updateModel(sample.model);
-  }, [updateModel]);
+  }, [changeRelation, updateModel]);
 
   useEffect(() => {
+    if (draft !== undefined) return;
     let savedModel: string | null = null;
     let savedLastValidModel: string | null = null;
     try {
@@ -442,7 +511,7 @@ export function FgaLens() {
       setDraftStorageReady(true);
     });
     return () => { active = false; };
-  }, [updateModel]);
+  }, [draft]);
 
   useEffect(() => {
     if (!draftStorageReady) return;
@@ -456,15 +525,19 @@ export function FgaLens() {
 
   useEffect(() => {
     const closeExpandedGraph = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setGraphExpanded(false);
+      if (event.key !== "Escape" || event.defaultPrevented || document.querySelector("dialog[open]")) return;
+      if (graphExpanded) {
+        setGraphExpanded(false);
+        expandedControl.current?.focus();
+      } else if (selectedRelationId) closeRelation();
     };
     window.addEventListener("keydown", closeExpandedGraph);
     return () => window.removeEventListener("keydown", closeExpandedGraph);
-  }, []);
+  }, [closeRelation, graphExpanded, selectedRelationId]);
 
   return (
     <div className="studio-shell">
-      <header className="studio-header">
+      {!draft && <header className="studio-header">
         <div className="brand-lockup"><LogoMark /><strong>FGA Lens</strong></div>
         <div className="document-path" aria-label="Current model">
           <span>model</span><b>/</b><strong>authorization-model.fga</strong>
@@ -486,7 +559,7 @@ export function FgaLens() {
             <FileCode2 size={13} /> DSL reference
           </a>
         </div>
-      </header>
+      </header>}
 
       <div className={`studio-workspace ${graphExpanded ? "graph-expanded" : ""}`}>
         <aside className="model-pane">
@@ -499,11 +572,13 @@ export function FgaLens() {
           </div>
           <ModelEditor
             diagnostics={parsed.diagnostics}
+            editor={editor}
+            workspace={Boolean(draft)}
             graph={graph}
             modelText={modelText}
             onChange={updateModel}
             onSelectRelation={selectRelation}
-            selectedLine={selectedRelation?.line ?? parsed.diagnostics[0]?.line}
+            selectedLine={parsed.diagnostics[0]?.line ?? selectedRelation?.line}
           />
         </aside>
 
@@ -528,6 +603,7 @@ export function FgaLens() {
                 aria-label={graphExpanded ? "Exit expanded graph" : "Expand graph"}
                 aria-pressed={graphExpanded}
                 className="expand-graph-button"
+                ref={expandedControl}
                 onClick={() => setGraphExpanded((current) => !current)}
                 title={graphExpanded ? "Exit expanded view (Esc)" : "Give the graph the full workspace"}
               >
@@ -541,7 +617,7 @@ export function FgaLens() {
             <ModelGraphCanvas
               graph={graph}
               key={graphSession}
-              onClearSelection={() => setSelectedRelationId(null)}
+              onClearSelection={() => changeRelation(null)}
               onSelect={selectRelation}
               selectedRelationId={selectedRelationId}
               viewKey={`${graphExpanded ? "expanded" : "split"}:${selectedRelationId ?? "all"}`}
@@ -552,7 +628,7 @@ export function FgaLens() {
                 <div><strong>Showing the last valid graph</strong><span>L{parsed.diagnostics[0].line}:{parsed.diagnostics[0].column} · {parsed.diagnostics[0].message}</span></div>
               </div>
             )}
-            {selectedRelation && <RelationInspector relation={selectedRelation} onClose={() => setSelectedRelationId(null)} />}
+            {selectedRelation && <RelationInspector relation={selectedRelation} onClose={closeRelation} onSource={parsed.graph ? openSource : undefined} />}
           </div>
         </main>
       </div>

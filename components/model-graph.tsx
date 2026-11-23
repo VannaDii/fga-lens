@@ -44,7 +44,7 @@ type TypeNodeData = {
   onSelect: (relation: GraphRelation) => void;
   onToggle: (typeId: string) => void;
   selectedRelationId: string | null;
-} & Record<string, unknown>;
+};
 
 type FgaTypeNode = Node<TypeNodeData, "fgaType">;
 
@@ -279,17 +279,20 @@ function GraphControlDock({
   );
 }
 
+/** Fit the current view after graph layout and honor reduced motion. */
 function FitGraph({ signature }: { signature: string }) {
   const { fitView } = useReactFlow();
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => fitView({ duration: 280, maxZoom: 1.05, padding: 0.18 }), 260);
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const timeout = window.setTimeout(() => fitView({ duration: reducedMotion ? 0 : 280, maxZoom: 1.05, padding: 0.18 }), 260);
     return () => window.clearTimeout(timeout);
   }, [fitView, signature]);
 
   return null;
 }
 
+/** Display the model projection and open a dependency’s target relation on selection. */
 export function ModelGraphCanvas({
   graph,
   onClearSelection,
@@ -353,6 +356,14 @@ export function ModelGraphCanvas({
     setNodes(elements.nodes);
   }, [elements.nodes, setNodes]);
 
+  /** Resolve the selected edge to the relation that defines its source expression. */
+  const selectDependency = (edgeId: string) => {
+    const dependency = graph.dependencies.find((entry) => entry.id === edgeId);
+    const relation = graph.types.find((type) => type.name === dependency?.targetType)?.relations
+      .find((entry) => entry.name === dependency?.targetRelation);
+    if (relation && relation.id !== selectedRelationId) onSelect(relation);
+  };
+
   return (
     <ReactFlow<FgaTypeNode, Edge>
       colorMode="light"
@@ -368,6 +379,10 @@ export function ModelGraphCanvas({
       nodesConnectable={false}
       nodesDraggable
       onNodesChange={onNodesChange}
+      onEdgeClick={(_, edge) => selectDependency(edge.id)}
+      onEdgesChange={(changes) => changes.forEach((change) => {
+        if (change.type === "select" && change.selected) selectDependency(change.id);
+      })}
       onPaneClick={onClearSelection}
       panOnDrag
       panOnScroll
