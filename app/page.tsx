@@ -1,5 +1,4 @@
-import { FgaLens } from "@/components/fga-lens";
-
+/** The shared shell restores the last workbench screen on a root visit. */
 export default function Home() {
-  return <FgaLens />;
+  return null;
 }
