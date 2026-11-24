@@ -1,8 +1,8 @@
-import { expect, test, type APIRequestContext } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { transformer } from "@openfga/syntax-transformer";
 
 import {
-  appCommand, appRequest, baseDsl, boundDraft, engineAllows, openTarget, policyFixture,
+  appCommand, appRequest, baseDsl, boundDraft, companionGrant, engineAllows, openTarget, policyFixture,
   routeGrant, setDraft, toYaml, workspace, writeEngine, type FixtureTarget,
 } from "./finding-helpers";
 import { armTransport, capturedRequests, clearTraffic, postToEngine } from "./workbench-fixtures";
@@ -180,4 +180,84 @@ test("F06 a split decimal rejected by stock CEL cannot reuse the valid installed
   const result = await app.json();
   expect.soft(app.ok() && !result.failure, "invalid CEL cannot yield a successful publish receipt").toBe(false);
   expect(boundDraft(await workspace(request), target).published).toBeUndefined();
+});
+
+/** Install both revisions in one stock store and capture its obsolete grant in the editor baseline. */
+async function revisedGrant(page: Page, request: APIRequestContext, name: string,
+  installedDsl: string, original: Tuple, nextDsl: string, authored: Tuple[]) {
+  const previous = await policyFixture(request, name, installedDsl, [original, companionGrant]);
+  const { authorization_model_id: revision } = await postToEngine(request, previous.path + "/authorization-models",
+    transformer.transformDSLToJSONObject(nextDsl));
+  const target = { ...previous, revision };
+  await setDraft(request, target, { dsl: nextDsl, validDsl: nextDsl,
+    yaml: toYaml(authored), baseline: [original, companionGrant] }, { autoSave: false, autoPublish: false });
+  await openTarget(page, target, "instances");
+  await expect(page.getByRole("combobox", { name: "Model revision", exact: true })).toHaveValue(revision);
+  expect(await observedTuple(request, target)).toEqual([{ ...original, condition: original.condition ?? null }]);
+  expect(await engineAllows(request, previous, routeGrant)).toBe(true);
+  await clearTraffic(request);
+  return { previous, target };
+}
+
+/** Submit a normal browser Publish and preserve the endpoint response for contract assertions. */
+async function publishFromEditor(page: Page, target: FixtureTarget) {
+  const delivered = page.waitForResponse((response) => {
+    const sent = response.request();
+    if (sent.method() !== "POST" || new URL(sent.url()).pathname !== "/api/workbench") return false;
+    const body = sent.postDataJSON();
+    return body.action === "publish-tuples" && body.target?.store === target.store && body.target.revision === target.revision;
+  });
+  await page.getByRole("button", { name: "Publish", exact: true }).click();
+  const response = await delivered;
+  return { status: response.status(), payload: await response.json() };
+}
+
+const revisedViewer = baseDsl.replace("define viewer: [user]", "define viewer: [group]") + "\n\ntype group\n";
+
+test("C2 Publish removes a stored grant whose subject restriction changed in the selected revision", async ({ page, request }) => {
+  const { previous, target } = await revisedGrant(page, request, "Obsolete stored subject", baseDsl, routeGrant, revisedViewer, [companionGrant]);
+  const { status, payload } = await publishFromEditor(page, target);
+  expect.soft(status, "a valid deletion is allowed by stock OpenFGA under the selected revision").toBe(200);
+  expect.soft(payload.failure).toBeUndefined();
+  expect.soft(await capturedRequests(request, target.path + "/read")).toContainEqual(expect.objectContaining({ tuple_key: routeGrant }));
+  expect.soft(await capturedRequests(request, target.path + "/write")).toEqual([{
+    authorization_model_id: target.revision, deletes: { tuple_keys: [routeGrant] },
+  }]);
+  expect.soft(await observedTuple(request, target)).toEqual([]);
+  expect.soft(await engineAllows(request, previous, routeGrant)).toBe(false);
+  expect(await engineAllows(request, target, companionGrant)).toBe(true);
+});
+
+test("C2 Publish replaces an obsolete condition on the same key under the selected revision", async ({ page, request }) => {
+  const original = inRegion("north");
+  const desired = { ...routeGrant, condition: { name: "district_guard", context: { region: "south" } } };
+  const revisedDsl = conditionalDsl.replaceAll("region_guard", "district_guard");
+  const { target } = await revisedGrant(page, request, "Obsolete stored condition", conditionalDsl, original, revisedDsl, [desired, companionGrant]);
+  const { status, payload } = await publishFromEditor(page, target);
+  expect.soft(status, "the new grant is valid and the obsolete condition does not invalidate its deletion").toBe(200);
+  expect.soft(payload.failure).toBeUndefined();
+  expect.soft(await capturedRequests(request, target.path + "/read")).toContainEqual(expect.objectContaining({ tuple_key: routeGrant }));
+  expect.soft(await capturedRequests(request, target.path + "/write")).toEqual([
+    { authorization_model_id: target.revision, deletes: { tuple_keys: [routeGrant] } },
+    { authorization_model_id: target.revision, writes: { tuple_keys: [desired] } },
+  ]);
+  expect.soft(await observedTuple(request, target)).toEqual([desired]);
+  const durable = boundDraft(await workspace(request), target);
+  expect.soft(durable.baseline).toEqual(expect.arrayContaining([desired, companionGrant]));
+  expect(durable.replacement).toBeUndefined();
+});
+
+test("C2 Publish reports an invalid addition and leaves the planned deletion and unrelated grant untouched", async ({ page, request }) => {
+  const invalid = { ...routeGrant, user: "user:invalid-addition" };
+  const { previous, target } = await revisedGrant(page, request, "Invalid addition before permitted removal", baseDsl, routeGrant,
+    revisedViewer, [companionGrant, invalid]);
+  const { status, payload } = await publishFromEditor(page, target);
+  expect(status).toBe(400);
+  expect.soft(payload.tupleIssues).toEqual([
+    expect.objectContaining({ operation: "add", reason: "userRestriction", row: { source: "draft", index: 1 } }),
+  ]);
+  expect(await capturedRequests(request, target.path + "/write")).toEqual([]);
+  expect(await observedTuple(request, target)).toEqual([{ ...routeGrant, condition: null }]);
+  expect(await engineAllows(request, previous, routeGrant)).toBe(true);
+  expect(await engineAllows(request, target, companionGrant)).toBe(true);
 });

@@ -1,13 +1,13 @@
 import { readFile } from "node:fs/promises";
 
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page, type Response } from "@playwright/test";
 import { transformer } from "@openfga/syntax-transformer";
 
 import {
-  baseDsl, boundDraft, companionGrant, engineAllows, fetchInstances, holdAction, openTarget, policyFixture,
+  baseDsl, boundDraft, companionGrant, engineAllows, fetchInstances, gateState, holdAction, openTarget, policyFixture,
   routeGrant, setDraft, toYaml, workspace, writeEngine,
 } from "./finding-helpers";
-import { capturedRequests, clearTraffic, postToEngine } from "./workbench-fixtures";
+import { armTransport, capturedRequests, clearTraffic, postToEngine } from "./workbench-fixtures";
 
 /** Await the editor's operation feedback after a save or publication reaches a terminal state. */
 function editorFeedback(page: Page) {
@@ -207,4 +207,100 @@ test("F04 fetch without local changes observes a real remote addition", async ({
   await writeEngine(request, target, { writes: { tuple_keys: [companionGrant] } });
   await fetchInstances(page);
   await expect(page.getByRole("textbox", { name: "Tuple YAML" })).toHaveValue(/user:casey/);
+});
+
+/** Identify the Save receipt for the pending interaction, including failures from the real handler. */
+function saveReceipt(response: Response, matches: (state: { model: string }) => boolean = () => true) {
+  const sent = response.request();
+  if (sent.method() !== "POST" || new URL(response.url()).pathname !== "/api/workbench") return false;
+  const body = sent.postDataJSON();
+  return body?.action === "save" && matches(body.state);
+}
+
+test("C1 delayed same-tab Save acknowledges the newer tuple checkpoint without losing draft or selection", async ({ page, request }) => {
+  const target = await policyFixture(request, "Delayed same-tab acknowledgement", baseDsl, [routeGrant]);
+  const { authorization_model_id: alternate } = await postToEngine(request, target.path + "/authorization-models",
+    transformer.transformDSLToJSONObject(baseDsl + "\n\ntype alternate_document\n"));
+  await setDraft(request, target, { yaml: toYaml([routeGrant]), baseline: [routeGrant] }, { autoSave: false, autoPublish: false });
+  await openTarget(page, target, "instances");
+  const editor = page.getByRole("textbox", { name: "Tuple YAML" });
+  const revision = page.getByRole("combobox", { name: "Model revision", exact: true });
+  const authored = toYaml([routeGrant, companionGrant]);
+  const later = "# retained while both replies were pending\n" + authored;
+  await editor.fill(authored);
+  const gate = "publish-before-save-acknowledgement";
+  await clearTraffic(request);
+  await armTransport(request, [{ path: target.path + "/authorization-models/" + target.revision, kind: "gate-response", gate }]);
+  const delayed = holdAction(page, "save", "after checkpoint", (body) =>
+    (body.state as { model?: string }).model === alternate);
+  await delayed.ready;
+  try {
+    await page.getByRole("button", { name: "Publish", exact: true }).click();
+    await expect.poll(() => gateState(request)).toContain(gate);
+    const publicationStart = await workspace(request);
+    const selectionReply = page.waitForResponse((response) => saveReceipt(response, (state) => state.model === alternate));
+    await revision.selectOption(alternate);
+    await delayed.arrived;
+    const laterSave = await workspace(request);
+    expect(laterSave.state).toMatchObject({ model: alternate, revision: publicationStart.state.revision + 1 });
+    await editor.fill(later);
+
+    await gateState(request, gate);
+    await expect(page.getByText("Tuple changes published", { exact: true })).toBeVisible();
+    const completed = await workspace(request);
+    expect(completed.state.revision).toBeGreaterThan(laterSave.state.revision);
+    expect(completed.state.authoredRevision).toBe(laterSave.state.authoredRevision);
+    expect(boundDraft(completed, target).baseline).toEqual([routeGrant, companionGrant]);
+    expect(await capturedRequests(request, target.path + "/write")).toEqual([{
+      authorization_model_id: target.revision, writes: { tuple_keys: [companionGrant] },
+    }]);
+
+    delayed.release();
+    expect((await selectionReply).ok()).toBe(true);
+    await expect(editor).toHaveValue(later);
+    await expect(revision).toHaveValue(alternate);
+    await expect.soft(page.getByText("In sync", { exact: true }), "the publication checkpoint updates the editor baseline").toBeVisible({ timeout: 2500 });
+
+    const nextSave = page.waitForResponse((response) => saveReceipt(response));
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await nextSave;
+    await expect.soft(page.getByText("Saved to workspace", { exact: true }), "the next ordinary Save succeeds").toBeVisible({ timeout: 2500 });
+    const persisted = await workspace(request);
+    expect.soft(persisted.state.model).toBe(alternate);
+    expect(boundDraft(persisted, target).yaml).toBe(later);
+  } finally {
+    delayed.release();
+    if ((await gateState(request)).includes(gate)) await gateState(request, gate);
+  }
+});
+
+test("C1 Save retries after an already-committed publication reply without waiting in a cycle", async ({ page, request }) => {
+  const target = await policyFixture(request, "Save retry with a held checkpoint", baseDsl, [routeGrant]);
+  await setDraft(request, target, { yaml: toYaml([routeGrant]), baseline: [routeGrant] }, { autoSave: false, autoPublish: false });
+  await openTarget(page, target, "instances");
+  const editor = page.getByRole("textbox", { name: "Tuple YAML" });
+  const saved = toYaml([routeGrant, companionGrant]);
+  const later = "# saved after the in-flight publication\n" + saved;
+  await editor.fill(saved);
+  const publication = holdAction(page, "publish-tuples", "after checkpoint");
+  await publication.ready;
+  try {
+    await page.getByRole("button", { name: "Publish", exact: true }).click();
+    await publication.arrived;
+    const committed = await workspace(request);
+    expect(boundDraft(committed, target).baseline).toEqual([routeGrant, companionGrant]);
+    await editor.fill(later);
+    const conflict = page.waitForResponse((response) => saveReceipt(response) && response.status() === 409);
+    const retry = page.waitForResponse((response) => saveReceipt(response) && response.status() === 200, { timeout: 4500 });
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await conflict;
+    publication.release();
+    const confirmed = (await (await retry).json()).state;
+    expect(confirmed.revision).toBe(committed.state.revision + 1);
+    await expect(page.getByText("Saved to workspace", { exact: true })).toBeVisible();
+    await expect(editor).toHaveValue(later);
+    expect(boundDraft(await workspace(request), target).yaml).toBe(later);
+  } finally {
+    publication.release();
+  }
 });

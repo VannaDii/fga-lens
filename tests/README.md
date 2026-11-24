@@ -54,6 +54,14 @@ Run the six [tuple publication diagnostics cases](tuple-publish-diagnostics.engi
 
 The F13 cases use a named barrier on the real installed-model reply to reject a captured attempt after a newer edit or a store switch. They verify feedback on the initiating editor, unchanged grants and draft selections, safe source navigation, and clear attribution of counts after success and a later blocked attempt.
 
+## Copilot repair regressions
+
+The [draft](draft-findings.engine.pw.ts) and [publication](publication-findings.engine.pw.ts) suites add five cases. C1 reverses delivery of real Save and Publish acknowledgments and checks the next Save. A separate retry control holds a committed Publish response while a Save conflicts. C2 uses two stock model revisions to verify deletion of an obsolete grant, same-key condition replacement, and zero writes when an invalid addition accompanies a valid removal. The [local boundary suite](local-boundary-regression.test.ts) adds two C3 cases comparing malformed UTF-8 with a valid literal replacement character. It checks exact recovery bytes and the subsequent file state after Save.
+
+Run `node tests/check-playwright-workspace-isolation.mjs` for the six C4 scenarios. The driver copies tracked project files and the installed lockfile-pinned dependencies into a disposable directory, without copying any local workspaces or `.env` files. Each real npm browser command runs the same [Save probe](playwright-workspace-probe.ts) once with default environment, once with a synthetic `FGA_WORKSPACE_DIR`, and once with `FGA_TEST_WORKSPACE_DIR` and the synthetic developer path both set. The probe checks the actual Next child’s target, successful Chrome Save and exact sentinel bytes. The driver checks fresh default directory cleanup and explicit override retention, then removes its own scratch checkout. Use the regular port overrides when other test listeners occupy the default ports.
+
+The approved isolated inventory is 86 standard runner cases (16 Vitest, 4 Chrome and 66 stock OpenFGA) plus the six C4 scenarios. Full qualification has 102 standard runner cases (32 Vitest, 4 Chrome and 66 stock OpenFGA) plus the same six scenarios, lint and build. The C4 probe is discovered only in the temporary checkout.
+
 ## Synthetic data and transport
 
 Generate a disposable import bundle with node tests/make-fixtures.mjs followed by a local destination path. The inline and relative batches include 108 shared tuples, duplicate case names with different grants, wildcard and userset assertions, and two request timestamps with opposite results. The inline batch adds an exact 100-context case. The overflow batch supplies 101. Use both variants with the [native file contract][format].
