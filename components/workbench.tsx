@@ -122,6 +122,8 @@ export function Workbench({ children }: { children: ReactNode }) {
   const [tuplePublications, setTuplePublications] = useState<Record<string, TuplePublication>>({});
   const instanceDialog = useRef<InstanceDialogHandle>(null);
   const selectionEpoch = useRef(new Map<string, number>());
+  /** Latest model Publish attempt per endpoint and store, independent of receipt ordering. */
+  const modelAttempts = useRef(new Map<string, symbol>());
   const tupleEpoch = useRef(new Map<string, number>());
   const fetchApplies = useRef(new Map<string, Promise<void>>());
   const jobs = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -229,12 +231,22 @@ export function Workbench({ children }: { children: ReactNode }) {
     remember((prior) => ({ ...prior, selections: { ...prior.selections, ...selections } }));
   }, [remember]);
 
-  /** Apply only server-owned publish and merge fields to the captured local draft. */
+  /**
+   * Apply only server-owned fields to the captured local draft.
+   * Reconcile an older model reply from the current acknowledged snapshot if that snapshot still confirms the publication.
+   * @param receipt A Publish or tuple conflict resolution receipt.
+   * @param capturedKey The originating endpoint and store key.
+   * @param capturedStore The originating store.
+   * @param kind Which editor owns the server fields.
+   * @param dispatchSelection Selection epoch when publication started.
+   * @param resolution The exact local tuple conflict to resolve, if applicable.
+   */
   function acceptDraft(
     receipt: WorkspaceView, capturedKey: string, capturedStore: string, kind: Editor, dispatchSelection?: number,
     resolution?: { identity: string; source: (draft: Draft) => string },
   ) {
-    accept(receipt, (local, persisted) => {
+    /** Merge the operation's confirmed fields while retaining newer live input and selections. */
+    const merge = (local: Workspace, persisted: Workspace) => {
       const confirmed = persisted.drafts[capturedKey];
       if (!confirmed) return local;
       const follows = (selectionEpoch.current.get(capturedKey) ?? 0) === dispatchSelection;
@@ -253,7 +265,18 @@ export function Workbench({ children }: { children: ReactNode }) {
         tupleCompleted: confirmed.tupleCompleted, tuplePending: confirmed.tuplePending, tuplesChecked: confirmed.tuplesChecked,
         yaml: resolution?.source(draft) ?? draft.yaml,
       }));
-    }, !resolution);
+    };
+    const acknowledged = durable.current;
+    if (kind === "model" && receipt.state.revision < acknowledged.revision) {
+      const completed = receipt.state.drafts[capturedKey];
+      const latest = acknowledged.drafts[capturedKey];
+      if (completed?.published && latest?.published === completed.published
+        && latest.publishedDsl === completed.publishedDsl && latest.modelChecked === completed.modelChecked) {
+        change((local) => merge(local, acknowledged));
+      }
+      return;
+    }
+    accept(receipt, merge, !resolution);
   }
 
   /** Report an editor operation on the store where it was initiated. */
@@ -261,10 +284,24 @@ export function Workbench({ children }: { children: ReactNode }) {
     setEditorNotices((notices) => ({ ...notices, [kind + "/" + storeKey]: message }));
   }
 
-  /** Save one editor and publish just the newly saved edit to its captured target. */
+  /**
+   * Save one editor and publish just the newly saved edit to its captured target.
+   * Model checkpoints reconcile independently of which attempt owns the visible feedback.
+   * @param kind The editor being saved.
+   * @param capturedStore The initiating store.
+   * @param revision The installed revision captured for a tuple publication.
+   * @param output The editor buffer captured for this save.
+   * @param explicit Whether Publish was requested directly.
+   */
   async function saveEditor(kind: Editor, capturedStore: string, revision: string, output: Draft, explicit: boolean) {
     const capturedKey = keyFor(capturedStore);
-    const set = (message: string) => editorMessage(kind, capturedKey, message);
+    let modelAttempt: symbol | undefined;
+    /** Allow model feedback only from the most recently dispatched attempt for this target. */
+    const ownsFeedback = () => !modelAttempt || modelAttempts.current.get(capturedKey) === modelAttempt;
+    /** Apply a status message while its attempt still owns the feedback. */
+    const set = (message: string) => {
+      if (ownsFeedback()) editorMessage(kind, capturedKey, message);
+    };
     /** Publish feedback belongs to the initiating store even while another target is visible. */
     const setPublication = (result: TuplePublication) =>
       setTuplePublications((previous) => ({ ...previous, [capturedKey]: result }));
@@ -273,6 +310,7 @@ export function Workbench({ children }: { children: ReactNode }) {
     const automatic = current.current.autoPublish && Boolean(capturedStore) && (kind === "model" || Boolean(revision));
     let tupleAttempt: TupleAttempt | undefined;
     let shouldPublish = explicit;
+    let publicationStarted = false;
     try {
       const saved = await persist((prior) => changeDraft(prior, capturedKey, (draft) => {
         shouldPublish ||= automatic && Boolean(editedForPublication(kind, draft, output));
@@ -292,7 +330,12 @@ export function Workbench({ children }: { children: ReactNode }) {
         if (savedDraft) tupleAttempt = { selectedRevision: revision, draft: savedDraft };
         set("");
         setPublication({ notice: "Publishing…" });
-      } else set("Publishing…");
+      } else {
+        modelAttempt = Symbol();
+        modelAttempts.current.set(capturedKey, modelAttempt);
+        set("Publishing…");
+      }
+      publicationStarted = true;
       setActivePublishes((active) => [...active, activityKey]);
       const dispatchSelection = selectionEpoch.current.get(capturedKey) ?? 0;
       if (kind === "instances") tupleEpoch.current.set(capturedKey, (tupleEpoch.current.get(capturedKey) ?? 0) + 1);
@@ -303,7 +346,7 @@ export function Workbench({ children }: { children: ReactNode }) {
           acceptDraft(receipt, capturedKey, capturedStore, kind, dispatchSelection);
           return receipt;
         }));
-      if (kind === "model") setFailedModel((failures) => {
+      if (kind === "model" && ownsFeedback()) setFailedModel((failures) => {
         const next = { ...failures };
         delete next[capturedKey];
         return next;
@@ -320,14 +363,16 @@ export function Workbench({ children }: { children: ReactNode }) {
         } else set(notice);
         return;
       }
-      if (kind === "model" && current.current.store === capturedStore) {
+      if (kind === "model" && ownsFeedback() && current.current.store === capturedStore) {
         const fresh = await invoke(modelsResponse, { action: "models", store: capturedStore });
-        if (current.current.store === capturedStore) setRevisions(fresh.authorization_models);
+        if (ownsFeedback() && current.current.store === capturedStore) setRevisions(fresh.authorization_models);
       }
       if (kind === "instances") setPublication({ notice: "Tuple changes published", counts });
       else set("Model published");
     } catch (error) {
-      if (shouldPublish && kind === "model") setFailedModel((failures) => ({ ...failures, [capturedKey]: output.dsl }));
+      if (shouldPublish && kind === "model" && ownsFeedback()) {
+        setFailedModel((failures) => ({ ...failures, [capturedKey]: output.dsl }));
+      }
       if (error instanceof TuplePublishRejection) {
         const report = tupleIssueReport(tupleAttempt, "preflight", error.issues);
         setPublication(report ? { report } : { notice: "Publish blocked · No tuple writes were made in this attempt." });
@@ -336,7 +381,7 @@ export function Workbench({ children }: { children: ReactNode }) {
           shouldPublish && kind === "instances" ? (notice) => setPublication({ notice }) : set);
       }
     } finally {
-      if (shouldPublish) setActivePublishes((active) => {
+      if (publicationStarted) setActivePublishes((active) => {
         const position = active.indexOf(activityKey);
         return position === -1 ? active : [...active.slice(0, position), ...active.slice(position + 1)];
       });
@@ -565,7 +610,7 @@ export function Workbench({ children }: { children: ReactNode }) {
         await persist(update);
         change(update);
       }}
-      savedRevision={savedRevision}
+      savedRevision={savedRevision} trackCheckpoint={trackCheckpoint}
       apply={(receipt) => accept(receipt, (prior, persisted) => ({ ...prior, batches: persisted.batches, report: persisted.report }), true)} />}
     {settings && <Dialog title="Settings" close={() => setSettings(false)}>
       <dl><dt>Endpoint</dt><dd>{endpoint || "Unavailable"}</dd><dt>Workspace</dt><dd>{view?.location ?? "Loading"}</dd>

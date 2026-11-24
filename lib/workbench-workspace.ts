@@ -58,10 +58,20 @@ export async function downloadRecovery() {
   });
 }
 
-/** Check the dispatch revision without silently moving a stale tab onto another snapshot. */
-export async function captureWorkspace(revision: number) {
+/**
+ * Check the dispatch revision before capturing the workspace.
+ * Model Publish can absorb server-only checkpoints whose changes cannot replace its saved DSL.
+ * @param revision The workspace revision selected by the caller.
+ * @param allowServerCheckpoints Whether server-only revisions can advance the capture.
+ * @returns The current workspace with the caller's authored input.
+ * @throws A conflict when another authored revision intervened or the request is ahead of the workspace.
+ */
+export async function captureWorkspace(revision: number, allowServerCheckpoints = false) {
   const view = await readWorkspace();
-  if (view.state.revision !== revision) throw new OperationFailure("conflict");
+  const { state } = view;
+  const serverOnly = allowServerCheckpoints && state.authoredRevision !== undefined
+    && state.authoredRevision <= revision && revision < state.revision;
+  if (state.revision !== revision && !serverOnly) throw new OperationFailure("conflict");
   return view;
 }
 

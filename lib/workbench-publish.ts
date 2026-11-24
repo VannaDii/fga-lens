@@ -12,25 +12,61 @@ function updateDraft(key: string, update: (draft: Draft) => Draft) {
   }));
 }
 
-/** Publish the saved model at the dispatch revision and preserve an intentional historical selection. */
+/** Order model publications for one endpoint and store while captures or writes are active. */
+type ModelPublications = {
+  /** Highest captured workspace revision admitted while this queue is active. */
+  latest: number;
+  /** Captures and publications still in flight, including requests that have yet to capture. */
+  pending: number;
+  /** Resolves after the last admitted publication settles, even if it failed. */
+  tail: Promise<void>;
+};
+
+/** Single-process queues for workbench model writes, keyed by endpoint and store. */
+const modelPublications = new Map<string, ModelPublications>();
+
+/**
+ * Publish a saved model in captured order and preserve an intentional historical selection.
+ * Capture before waiting so later workspace saves cannot replace the request's source.
+ * @param store Store captured at dispatch.
+ * @param revision Workspace revision containing the saved model.
+ * @param signal Cancellation signal for the publication.
+ * @returns The workspace checkpoint after provider completion.
+ * @throws A scoped conflict for a stale capture, or the operation's validation or provider failure.
+ */
 export async function publishSavedModel(store: string, revision: number, signal: AbortSignal) {
   const key = draftKey(store);
-  const { state } = await captureWorkspace(revision);
-  const saved = state.drafts[key];
-  if (!saved) throw new OperationFailure("invalid input");
-  const content = savedModel(saved.dsl);
-  const result = await publishModel(store, content, signal);
-  return checkpoint((current) => {
-    const latest = current.drafts[key] ?? emptyDraft;
-    const followsPublished = !latest.modelManual || latest.modelSelection === saved.published;
-    const modelSelection = followsPublished ? result.revision : latest.modelSelection;
-    return {
-      ...current,
-      ...(current.store === store && followsPublished ? { model: result.revision } : {}),
-      drafts: { ...current.drafts, [key]: { ...latest, published: result.revision,
-        publishedDsl: saved.dsl, modelSelection, modelManual: !followsPublished, modelChecked: Date.now() } },
-    };
-  });
+  const queue = modelPublications.get(key) ?? { latest: -1, pending: 0, tail: Promise.resolve() };
+  modelPublications.set(key, queue);
+  queue.pending += 1;
+  try {
+    const { state } = await captureWorkspace(revision, true);
+    const saved = state.drafts[key];
+    if (!saved) throw new OperationFailure("invalid input");
+    const content = savedModel(saved.dsl);
+    if (revision < queue.latest) throw new OperationFailure("conflict");
+    queue.latest = revision;
+    const publication = queue.tail.then(async () => {
+      if (signal.aborted) throw new OperationFailure("cancellation");
+      const result = await publishModel(store, content, signal);
+      return checkpoint((current) => {
+        const latest = current.drafts[key] ?? emptyDraft;
+        const followsPublished = !latest.modelManual || latest.modelSelection === saved.published;
+        const modelSelection = followsPublished ? result.revision : latest.modelSelection;
+        return {
+          ...current,
+          ...(current.store === store && followsPublished ? { model: result.revision } : {}),
+          drafts: { ...current.drafts, [key]: { ...latest, published: result.revision,
+            publishedDsl: saved.dsl, modelSelection, modelManual: !followsPublished, modelChecked: Date.now() } },
+        };
+      });
+    });
+    queue.tail = publication.then(() => undefined, () => undefined);
+    return await publication;
+  } finally {
+    queue.pending -= 1;
+    if (!queue.pending) modelPublications.delete(key);
+  }
 }
 
 /** Resolve a tuple conflict against the saved YAML without saving the live editor buffer. */

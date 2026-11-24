@@ -10,10 +10,12 @@ import { decode, modelsResponse, mutationResult, target as targetCodec, type Bat
 import { Dialog, download, failureText, invoke, JobStatus, Select } from "./workbench-ui";
 
 /** Show the workspace's authored regression batches and isolated fixture targets. */
-export function BatchScreen({ state, target, stores, endpoint, remember, add, savedRevision, apply }: {
+export function BatchScreen({ state, target, stores, endpoint, remember, add, savedRevision, trackCheckpoint, apply }: {
   state: Workspace; target: Target; stores: Array<{ id: string; name: string }>; endpoint: string;
   remember: (value: Record<string, string>) => void; add: (batch: Batch) => Promise<void>;
   savedRevision: () => Promise<number>; apply: (receipt: WorkspaceView) => void;
+  /** Register the request through receipt application so overlapping preference saves can retry. */
+  trackCheckpoint: <A>(operation: Promise<A>) => Promise<A>;
 }) {
   const active = state.batches.find((batch) => batch.id === state.selections?.batch) ?? state.batches[0];
   const installation = active?.installations?.[endpoint];
@@ -65,7 +67,11 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
     return () => controller.abort();
   }, [focusedBatch, importedDsl, installed, stores.length]);
 
-  /** Preserve fixture sync on errors and retain the captured source and run report on success. */
+  /**
+   * Preserve fixture sync on errors and retain the captured source and run report on success.
+   * Register the mutation only after waiting for prior saves so retries cannot wait in a cycle.
+   * @param kind Whether to install the captured fixture or run the captured cases.
+   */
   async function execute(kind: "fixture" | "batch") {
     if (!active) return;
     setPending(kind);
@@ -74,10 +80,13 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
       const workspaceRevision = await savedRevision();
       const id = crypto.randomUUID();
       if (kind === "batch") setJob(id);
-      const receipt = await invoke(mutationResult, kind === "fixture"
+      const receipt = await trackCheckpoint(invoke(mutationResult, kind === "fixture"
         ? { action: kind, source: { store, revision }, batchId: active.id, revision: workspaceRevision }
-        : { action: kind, batchId: active.id, cases: selected, job: id, revision: workspaceRevision });
-      apply(receipt);
+        : { action: kind, batchId: active.id, cases: selected, job: id, revision: workspaceRevision })
+        .then((receipt) => {
+          apply(receipt);
+          return receipt;
+        }));
       if (receipt.failure) setMessage("Publish fixture · " + failureText(receipt.failure) + " · Publish fixture again");
     } catch (error) {
       const label = kind === "batch" ? "Run selected" : "Publish fixture";

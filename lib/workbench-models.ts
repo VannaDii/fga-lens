@@ -2,7 +2,7 @@ import { transformer, validator } from "@openfga/syntax-transformer";
 
 import {
   canonical, decode, json, modelContent, type ConditionContext, type Json, type ModelContent, type Parameter,
-  type Tuple, type TupleIssueDetail,
+  type Query, type Tuple, type TupleIssueDetail,
 } from "./workbench-contract";
 
 /** Parse the complete model. The graph uses its own display projection of this data.
@@ -15,10 +15,25 @@ export function parseModelContent(source: string) {
   return decode(modelContent, transformer.transformDSLToJSONObject(source));
 }
 
-/** Keep CEL tokens separate while ignoring formatting outside quoted literals. */
+/** Raw CEL string and bytes delimiters ignore backslashes. */
+const rawCelLiteral = /(?:[bB][rR]|[rR][bB]?)(?:"""[\s\S]*?"""|'''[\s\S]*?'''|"[^"\r\n]*"|'[^'\r\n]*')/;
+
+/** An escaped character cannot start a closing delimiter, even in a triple-quoted literal. */
+const escapedCelLiteral = /[bB]?(?:"""(?:\\[\s\S]|(?!""")[^\\])*"""|'''(?:\\[\s\S]|(?!''')[^\\])*'''|"(?:\\[\s\S]|[^"\\\r\n])*"|'(?:\\[\s\S]|[^'\\\r\n])*')/;
+
+/** Match comments, numeric tokens, names and operators outside literals. */
+const otherCelToken = /\/\/[^\n]*|(?:0[xX][\dA-Fa-f]+[uU]?|(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+|\d+[uU]?)|\w+|==|!=|<=|>=|&&|\|\||\S/;
+
+/** Recognize string and bytes tokens before normalizing whitespace and comments. */
+const celTokens = new RegExp([rawCelLiteral.source, escapedCelLiteral.source, otherCelToken.source].join("|"), "g");
+
+/**
+ * Keep CEL tokens separate while ignoring formatting outside complete quoted literals.
+ * @param expression Parsed condition source from the model.
+ * @returns Lexemes in source order, with exact literal text.
+ */
 function expressionKey(expression: string) {
-  const lexemes = /(?:[bB][rR]?|[rR][bB]?)?(?:"""[\s\S]*?"""|\x27\x27\x27[\s\S]*?\x27\x27\x27|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\/\/[^\n]*|(?:0[xX][\dA-Fa-f]+[uU]?|(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+|\d+[uU]?)|[\w]+|==|!=|<=|>=|&&|\|\||[^\s]/g;
-  return [...expression.matchAll(lexemes)].map(([token]) => token).filter((token) => !token.startsWith("//"));
+  return [...expression.matchAll(celTokens)].map(([token]) => token).filter((token) => !token.startsWith("//"));
 }
 
 /** Remove empty protobuf containers while retaining meaningful model fields. */
@@ -61,6 +76,66 @@ export function parameters(content: ModelContent) {
   return values;
 }
 
+/** Unit multipliers accepted by Go's duration parser, in nanoseconds. */
+const durationUnits = new Map([
+  ["ns", 1], ["us", 1_000], ["µs", 1_000], ["μs", 1_000],
+  ["ms", 1_000_000], ["s", 1_000_000_000], ["m", 60_000_000_000], ["h", 3_600_000_000_000],
+]);
+
+/** Largest magnitude representable by a signed 64-bit duration. */
+const negativeDurationLimit = BigInt("9223372036854775808");
+
+/** Largest positive signed duration, in nanoseconds. */
+const positiveDurationLimit = negativeDurationLimit - BigInt(1);
+
+/**
+ * Convert a decimal fraction with the precision and per-component truncation of Go ParseDuration.
+ * @param digits Fractional decimal digits, including leading zeroes.
+ * @param unit Nanoseconds per whole unit.
+ * @returns Fractional component truncated to whole nanoseconds.
+ */
+function durationFraction(digits: string, unit: number) {
+  let numerator = BigInt(0);
+  let scale = 1;
+  const radix = BigInt(10);
+  const fractionLimit = positiveDurationLimit / radix;
+  for (const digit of digits) {
+    if (numerator > fractionLimit) break;
+    const next = numerator * radix + BigInt(digit);
+    if (next > negativeDurationLimit) break;
+    numerator = next;
+    scale *= 10;
+    if (!Number.isFinite(scale)) return 0;
+  }
+  return Math.trunc(Number(numerator) * (unit / scale));
+}
+
+/**
+ * Validate the grammar and range used by OpenFGA's Go duration converter.
+ * @param value Authored condition value, whose spelling is kept in the wire payload.
+ * @returns Whether the string represents a signed 64-bit nanosecond duration.
+ */
+function validDuration(value: string) {
+  const negative = value.startsWith("-");
+  const rest = negative || value.startsWith("+") ? value.slice(1) : value;
+  if (rest === "0") return true;
+  if (!rest.length) return false;
+  const limit = negative ? negativeDurationLimit : positiveDurationLimit;
+  const component = /(\d*)(?:\.(\d*))?(ns|[uµμm]s|s|m|h)/y;
+  let total = BigInt(0);
+  while (component.lastIndex < rest.length) {
+    const match = component.exec(rest);
+    if (!match || (!match[1] && !match[2])) return false;
+    const [, whole, fraction = "", suffix] = match;
+    const unit = durationUnits.get(suffix);
+    const significant = whole.replace(/^0+/, "");
+    if (unit === undefined || significant.length > 19) return false;
+    total += BigInt(significant || "0") * BigInt(unit) + BigInt(durationFraction(fraction, unit));
+    if (total > limit) return false;
+  }
+  return true;
+}
+
 /** Validate typed JSON condition values against the declared OpenFGA type. */
 function conditionValue(value: Json, parameter: Parameter): boolean {
   const element = parameter.generic_types?.[0];
@@ -75,7 +150,7 @@ function conditionValue(value: Json, parameter: Parameter): boolean {
     case "TYPE_NAME_DOUBLE": return typeof value === "number";
     case "TYPE_NAME_TIMESTAMP": return typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)
       && Number.isFinite(Date.parse(value));
-    case "TYPE_NAME_DURATION": return typeof value === "string" && /^-?(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))+$/.test(value);
+    case "TYPE_NAME_DURATION": return typeof value === "string" && validDuration(value);
     case "TYPE_NAME_IPADDRESS": return typeof value === "string" && (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(value)
       ? value.split(".").every((part) => Number(part) <= 255)
       : /^[a-fA-F0-9:.]+:.+$/.test(value));
@@ -111,6 +186,23 @@ function tupleSubject(value: string) {
     return null;
   }
   return { ...identity, object, relation };
+}
+
+/**
+ * Match an identifier to the captured list shape before offering a follow-up Check.
+ * @param input The original query, including its object type or user filter.
+ * @param identity The exact returned or workspace identifier.
+ */
+export function inspectableListEntry(input: Query, identity: string) {
+  if (input.operation === "list-objects") {
+    const object = tupleObject(identity);
+    return object?.type === input.type && object.id !== "*";
+  }
+  if (input.operation === "list-users") {
+    const subject = tupleSubject(identity);
+    return subject?.type === input.filter.type && subject.relation === input.filter.relation;
+  }
+  return false;
 }
 
 /** Explain malformed keys using the same rules that guard Read and Write.

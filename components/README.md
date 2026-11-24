@@ -4,7 +4,11 @@ The shared workbench holds file state and store selection across the four screen
 
 The [workspace state hook](workbench-state.ts) reconciles reordered Save and publication replies. A newer checkpoint can follow a Save only after that tab's successful Save reply proves ownership of the same authored revision. The checkpoint then merges server-owned fields into the live buffer and makes the newer revision available to the next Save.
 
+Model Publish feedback follows the latest attempt for the captured store. The server checkpoints each admitted model in order, and late receipts still reconcile without replacing a newer notice or an explicit historical selection. [Batches](workbench-batches.tsx) registers fixture and report receipts through their application so concurrent preference saves can retry against the acknowledged revision.
+
 The [workbench header](workbench.tsx) groups the primary store and model revision with connection and settings. Model and Instances show their own actions and last sync check after Publish. Queries keeps its comparison controls and Batches keeps its fixture actions in their screens. The header scrolls with the page on narrow screens to keep the editors reachable.
+
+[Queries](workbench-queries.tsx) offers each list result's eligible identities alongside eligible candidates known at dispatch. Inspect runs a later Check with that side's original target, relation, condition context, and contextual tuples.
 
 The [Instances relationship map](workbench-instance-graph.tsx) places concrete `parent` tuples in lanes from subject to object. Other outgoing tuples appear in Direct assignments, including for a focus with parents or children. Role labels group distinct assignees under the owning resource. Every action opens one exact tuple, including its full userset subject when present. The direct tuple disclosure lists raw IDs and directions. The [Instances screen](workbench-instances.tsx) keeps the store-scoped focus, source jump and keyboard focus return.
 

@@ -8,14 +8,16 @@ import {
   type Batch, type ConditionContext, type Draft, type InstalledModel, type Json, type Parameter, type Query, type Target,
 } from "@/lib/workbench-contract";
 import { readYaml, tupleIndex } from "@/lib/workbench-drafts";
-import { invalidContext, parameters } from "@/lib/workbench-models";
+import { inspectableListEntry, invalidContext, parameters } from "@/lib/workbench-models";
 import { queryPath, queryRequest } from "@/lib/workbench-query-request";
 import { Dialog, failureText, invoke, JobStatus, Select } from "./workbench-ui";
 
 /** All result presentation fields belong to the request captured at dispatch. */
 type Captured = {
   id: string; target: Target; input: Query; request: Json; result?: t.TypeOf<typeof queryResult>;
-  evidence?: t.TypeOf<typeof evidenceResult>; error?: string; job?: string; listEntries: string[];
+  evidence?: t.TypeOf<typeof evidenceResult>; error?: string; job?: string;
+  /** Eligible captured workspace entries and any identities returned by this side. */
+  listEntries: string[];
 };
 
 const operations = [
@@ -183,7 +185,10 @@ export function QueryScreen({ draft, target, model, storeList, batches, selectio
     }
   }
 
-  /** Build one immutable operation and execute primary and alternate requests independently. */
+  /**
+   * Build one immutable operation and execute primary and alternate requests independently.
+   * Each side can inspect its own returned list entries and captured workspace candidates.
+   */
   async function run() {
     const context: ConditionContext = Object.fromEntries([...declared].flatMap(([name, types]) => {
       const key = conditionKey(name, types);
@@ -206,8 +211,7 @@ export function QueryScreen({ draft, target, model, storeList, batches, selectio
       return;
     }
     const targets = [target, ...(compare ? [{ store: alternateStore, revision: alternateRevision }] : [])];
-    const listEntries = input.operation === "list-objects" ? objects.filter((object) => object.startsWith(input.type + ":"))
-      : input.operation === "list-users" ? users : [];
+    const listEntries = identifiers.filter((identity) => inspectableListEntry(input, identity));
     const sides = targets.map((target) => ({ id: crypto.randomUUID(), target, input, listEntries, request: decode(json, queryRequest(input, target.revision)) }));
     if (sides.some((side) => side.request === null)) { setMessage("Invalid request or more than 100 contextual tuples"); return; }
     setMessage("");
@@ -217,7 +221,10 @@ export function QueryScreen({ draft, target, model, storeList, batches, selectio
     await Promise.all(sides.map(async (side, index) => {
       try {
         const result = await invoke(queryResult, { action: "query", target: side.target, input });
-        setCaptured((prior) => prior.map((row, position) => index === position ? { ...row, result } : row));
+        const returned = typeof result.outcome === "boolean" ? []
+          : result.outcome.filter((identity) => inspectableListEntry(input, identity));
+        const listEntries = [...new Set([...side.listEntries, ...returned])].sort();
+        setCaptured((prior) => prior.map((row) => row.id === side.id ? { ...row, result, listEntries } : row));
         if (input.operation === "check") await collect({ ...side, result }, index);
       } catch (error) {
         const message = error instanceof Error ? error.message : "server error";
