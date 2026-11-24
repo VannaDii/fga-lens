@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
 
-import { expect, test, type APIRequestContext, type Page, type Response } from "@playwright/test";
+import { errors, expect, test, type APIRequestContext, type Page, type Response } from "@playwright/test";
 import { transformer } from "@openfga/syntax-transformer";
 
 import {
-  baseDsl, boundDraft, companionGrant, engineAllows, fetchInstances, gateState, holdAction, openTarget, policyFixture,
+  appCommand, baseDsl, boundDraft, companionGrant, engineAllows, fetchInstances, gateState, holdAction, openTarget, policyFixture,
   routeGrant, setDraft, toYaml, workspace, writeEngine,
 } from "./finding-helpers";
 import { armTransport, capturedRequests, clearTraffic, postToEngine } from "./workbench-fixtures";
@@ -302,5 +302,119 @@ test("C1 Save retries after an already-committed publication reply without waiti
     expect(boundDraft(await workspace(request), target).yaml).toBe(later);
   } finally {
     publication.release();
+  }
+});
+
+/** Keep the normal authoring path enabled while completed publication responses are deliberately reordered. */
+async function openAutoPublishingModel(page: Page, request: APIRequestContext, name: string) {
+  const target = await policyFixture(request, name);
+  await setDraft(request, target, { dsl: baseDsl, validDsl: baseDsl, modelManual: false },
+    { autoSave: true, autoPublish: true, resetSelections: true });
+  await openTarget(page, target, "model");
+  const editor = page.getByRole("textbox", { name: "OpenFGA authorization model" });
+  const revision = page.getByRole("combobox", { name: "Model revision", exact: true });
+  await expect(editor).toHaveValue(baseDsl);
+  await expect.poll(async () => (await workspace(request)).state.route).toBe("model");
+  return { target, editor, revision };
+}
+
+/** Wait briefly for a concurrent B receipt. An implementation can instead serialize it behind A. */
+async function newerReplyWhileHeld(page: Page, revision: number) {
+  try {
+    return await page.waitForResponse((reply) => {
+      const sent = reply.request();
+      if (sent.method() !== "POST" || new URL(sent.url()).pathname !== "/api/workbench") return false;
+      const body = sent.postDataJSON();
+      return body?.action === "publish-model" && body.revision === revision;
+    }, { timeout: 1400 });
+  } catch (error) {
+    if (!(error instanceof errors.TimeoutError)) throw error;
+    return null;
+  }
+}
+
+/** Compare actual installed revision contents with the final workspace, live selection, and reload. */
+async function expectLatestModel(page: Page, request: APIRequestContext,
+  authoring: Awaited<ReturnType<typeof openAutoPublishingModel>>, newest: string, expectedType: string, manual?: string) {
+  const { target, editor, revision } = authoring;
+  await expect(page.getByRole("button", { name: /^Publish(?: again| new draft)?$/ })).toBeEnabled();
+  await expect(page.getByText("Model published", { exact: true })).toBeVisible();
+  const { authorization_models: installed } = await appCommand<{
+    authorization_models: { id: string; type_definitions: { type: string }[] }[];
+  }>(request, { action: "models", store: target.store });
+  const newestInstalled = installed.find(({ type_definitions }) => type_definitions.some(({ type }) => type === expectedType));
+  expect(newestInstalled, "the valid newest edit is installed in the real store").toBeDefined();
+  expect.soft(installed[0].id, "an older attempt never creates a later upstream revision").toBe(newestInstalled?.id);
+  const saved = await workspace(request);
+  expect.soft(boundDraft(saved, target)).toMatchObject({ dsl: newest, publishedDsl: newest, published: newestInstalled!.id });
+  const selected = manual ?? newestInstalled!.id;
+  await expect.soft(revision).toHaveValue(selected, { timeout: 1800 });
+  await expect(editor).toHaveValue(newest);
+  expect.soft(saved.state.model).toBe(selected);
+  await page.reload();
+  await expect.soft(revision).toHaveValue(selected, { timeout: 1800 });
+  await expect(editor).toHaveValue(newest);
+}
+
+test("C6 a retry for the older auto-publication cannot install behind the newer valid edit", async ({ page, request }) => {
+  const authoring = await openAutoPublishingModel(page, request, "Older provider retry");
+  const { target, editor } = authoring;
+  const older = baseDsl + "\n\ntype older_retry_document\n";
+  const newer = baseDsl + "\n\ntype newer_retry_document\n";
+  const write = target.path + "/authorization-models";
+  const lookup = write + "?continuation_token=";
+  const gate = "older-retry-lookup";
+  await clearTraffic(request);
+  await armTransport(request, [
+    { path: lookup, kind: "forward" }, { path: write, kind: "drop-request" },
+    { path: lookup, kind: "gate-response", gate },
+  ]);
+  try {
+    await editor.fill(older);
+    await expect.poll(() => gateState(request)).toContain(gate);
+    await editor.fill(newer);
+    await expect.poll(async () => boundDraft(await workspace(request), target).dsl).toBe(newer);
+    const saved = await workspace(request);
+    await newerReplyWhileHeld(page, saved.state.revision);
+    await gateState(request, gate);
+    await expectLatestModel(page, request, authoring, newer, "newer_retry_document");
+  } finally {
+    if ((await gateState(request)).includes(gate)) await gateState(request, gate);
+  }
+});
+
+test("C6 delayed older provider and browser receipts keep the newest publication and an explicit historical choice", async ({ page, request }) => {
+  const authoring = await openAutoPublishingModel(page, request, "Older model acknowledgement");
+  const { target, editor, revision } = authoring;
+  const anchor = baseDsl + "\n\ntype historical_choice\n";
+  const { authorization_model_id: historical } = await postToEngine(request, target.path + "/authorization-models",
+    transformer.transformDSLToJSONObject(anchor));
+  await page.reload();
+  await expect(revision.getByRole("option", { name: historical, exact: true })).toHaveCount(1);
+  await revision.selectOption(historical);
+  await expect.poll(async () => (await workspace(request)).state.model).toBe(historical);
+
+  const older = baseDsl + "\n\ntype older_receipt_document\n";
+  const newer = baseDsl + "\n\ntype newer_receipt_document\n";
+  const gate = "older-model-write-response";
+  const receipt = holdAction(page, "publish-model", "after checkpoint");
+  await receipt.ready;
+  await clearTraffic(request);
+  await armTransport(request, [{ path: target.path + "/authorization-models", kind: "gate-response", gate }]);
+  try {
+    await editor.fill(older);
+    await expect.poll(() => gateState(request)).toContain(gate);
+    await editor.fill(newer);
+    await expect.poll(async () => boundDraft(await workspace(request), target).dsl).toBe(newer);
+    const saved = await workspace(request);
+    await newerReplyWhileHeld(page, saved.state.revision);
+    await gateState(request, gate);
+    await receipt.arrived;
+    await expect(revision).toHaveValue(historical);
+    receipt.release();
+    await expectLatestModel(page, request, authoring, newer, "newer_receipt_document", historical);
+  } finally {
+    receipt.release();
+    if ((await gateState(request)).includes(gate)) await gateState(request, gate);
   }
 });

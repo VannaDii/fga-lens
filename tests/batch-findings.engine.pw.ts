@@ -1,15 +1,16 @@
 import { readFile } from "node:fs/promises";
 
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { transformer } from "@openfga/syntax-transformer";
 import { parse } from "yaml";
 
 import { exportBatch, importBatch } from "@/lib/workbench-batches";
 import type { Batch, Tuple, WorkspaceView } from "@/lib/workbench-contract";
 import {
-  appCommand, appRequest, baseDsl, companionGrant, engineAllows, fetchInstances, gateState, openTarget,
+  appCommand, appRequest, baseDsl, companionGrant, engineAllows, fetchInstances, gateState, holdAction, openTarget,
   policyFixture, routeGrant, setDraft, toYaml, workspace, type FixtureTarget,
 } from "./finding-helpers";
-import { armTransport, capturedRequests, clearTraffic, readFixture } from "./workbench-fixtures";
+import { armTransport, capturedRequests, clearTraffic, postToEngine, readFixture } from "./workbench-fixtures";
 
 /** Create several authored assertions whose names and boolean values cannot identify them. */
 async function stageBatch(request: APIRequestContext, name: string) {
@@ -51,6 +52,95 @@ async function reportRows(page: Page) {
   await expect(page.getByRole("heading", { name: "Last run", exact: true })).toBeVisible();
   return page.getByRole("table").locator("tbody").getByRole("row");
 }
+
+/** Observe a browser preference Save started before the earlier real checkpoint receipt is released. */
+function preferenceAttempt(page: Page, key: string, value: string) {
+  return page.waitForResponse((response) => {
+    const sent = response.request();
+    if (sent.method() !== "POST" || new URL(sent.url()).pathname !== "/api/workbench") return false;
+    const body = sent.postDataJSON();
+    return body?.action === "save" && body.state?.selections?.[key] === value;
+  });
+}
+
+test("C7 source preference persists while a committed fixture receipt is delayed", async ({ page, request }) => {
+  const source = await policyFixture(request, "Delayed fixture receipt");
+  const { authorization_model_id: otherRevision } = await postToEngine(request, source.path + "/authorization-models",
+    transformer.transformDSLToJSONObject(baseDsl + "\n\ntype alternate_source\n"));
+  const batch: Batch = { id: crypto.randomUUID(), name: "Fixture receipt preference", tuples: [routeGrant], cases: [] };
+  const { state, endpoint } = await workspace(request);
+  const sourceKey = "batch-source-store/" + endpoint + "/" + batch.id;
+  const revisionKey = "batch-source-model/" + endpoint + "/" + batch.id;
+  await appCommand(request, { action: "save", state: { ...state, route: "batches", batches: [...state.batches, batch],
+    selections: { ...state.selections, batch: batch.id, [sourceKey]: source.store, [revisionKey]: source.revision },
+  } });
+  await page.goto("/batches");
+  const revision = page.getByRole("combobox", { name: "Source model revision", exact: true });
+  await expect(revision).toHaveValue(source.revision);
+  const held = holdAction(page, "fixture", "after checkpoint", (body) => body.batchId === batch.id);
+  await held.ready;
+  const publish = page.getByRole("button", { name: "Publish fixture", exact: true });
+  try {
+    await publish.click();
+    await held.arrived;
+    const binding = (await workspace(request)).state.batches.find(({ id }) => id === batch.id)?.installations?.[endpoint];
+    expect(binding?.source).toEqual({ store: source.store, revision: source.revision });
+    expect(binding?.fixture).toBeDefined();
+    const save = preferenceAttempt(page, revisionKey, otherRevision);
+    await revision.selectOption(otherRevision);
+    expect((await save).status()).toBeLessThan(500);
+    held.release();
+    await expect(publish).toBeEnabled();
+    await expect(revision).toHaveValue(otherRevision);
+    await expect.configure({ soft: true }).poll(async () => (await workspace(request)).state.selections?.[revisionKey], { timeout: 2000 })
+      .toBe(otherRevision);
+    await page.reload();
+    await expect.soft(revision).toHaveValue(otherRevision, { timeout: 2000 });
+    expect((await workspace(request)).state.batches.find(({ id }) => id === batch.id)?.installations?.[endpoint]).toEqual(binding);
+    expect(await engineAllows(request, { ...binding!.fixture!, path: "/stores/" + binding!.fixture!.store }, routeGrant)).toBe(true);
+  } finally {
+    held.release();
+  }
+});
+
+test("C7 case preferences survive a delayed report without adding assertions to the captured run", async ({ page, request }) => {
+  const { batch, fixture } = await stageBatch(request, "Report receipt preference");
+  const { state } = await workspace(request);
+  const [first, second] = batch.cases;
+  const key = "batch-cases/" + batch.id;
+  await appCommand(request, { action: "save", state: { ...state, route: "batches",
+    selections: { ...state.selections, [key]: JSON.stringify([first.id]) },
+  } });
+  await page.goto("/batches");
+  const secondCase = page.getByRole("checkbox", { name: /^2\. Repeated case/ });
+  await expect(secondCase).not.toBeChecked();
+  const held = holdAction(page, "batch", "after checkpoint", (body) => body.batchId === batch.id);
+  await held.ready;
+  const run = page.getByRole("button", { name: "Run selected", exact: true });
+  try {
+    await clearTraffic(request);
+    await run.click();
+    await held.arrived;
+    const report = (await workspace(request)).state.report;
+    expect(report?.batchId).toBe(batch.id);
+    expect(report?.rows.map(({ caseId, status }) => [caseId, status])).toEqual([[first.id, "pass"], [first.id, "pass"]]);
+    expect((await capturedRequests(request, fixture.path + "/check")).map(({ tuple_key }) => tuple_key.relation))
+      .toEqual(["viewer", "access"]);
+    const expanded = JSON.stringify([first.id, second.id]);
+    const save = preferenceAttempt(page, key, expanded);
+    await secondCase.check();
+    expect((await save).status()).toBeLessThan(500);
+    held.release();
+    await expect(page.getByRole("heading", { name: "Last run", exact: true })).toBeVisible();
+    await expect.configure({ soft: true }).poll(async () => (await workspace(request)).state.selections?.[key], { timeout: 2000 }).toBe(expanded);
+    await page.reload();
+    await expect.soft(secondCase).toBeChecked({ timeout: 2000 });
+    await expect(page.getByRole("table").locator("tbody").getByRole("row")).toHaveCount(2);
+    expect((await workspace(request)).state.report).toEqual(report);
+  } finally {
+    held.release();
+  }
+});
 
 test("F11 report distinguishes duplicate case occurrences and equal-boolean Check assertions", async ({ page, request }) => {
   const { batch } = await stageBatch(request, "Assertion identities");

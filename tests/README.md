@@ -60,7 +60,13 @@ The [draft](draft-findings.engine.pw.ts) and [publication](publication-findings.
 
 Run `node tests/check-playwright-workspace-isolation.mjs` for the six C4 scenarios. The driver copies tracked project files and the installed lockfile-pinned dependencies into a disposable directory, without copying any local workspaces or `.env` files. Each real npm browser command runs the same [Save probe](playwright-workspace-probe.ts) once with default environment, once with a synthetic `FGA_WORKSPACE_DIR`, and once with `FGA_TEST_WORKSPACE_DIR` and the synthetic developer path both set. The probe checks the actual Next child’s target, successful Chrome Save and exact sentinel bytes. The driver checks fresh default directory cleanup and explicit override retention, then removes its own scratch checkout. Use the regular port overrides when other test listeners occupy the default ports.
 
-The approved isolated inventory is 86 standard runner cases (16 Vitest, 4 Chrome and 66 stock OpenFGA) plus the six C4 scenarios. Full qualification has 102 standard runner cases (32 Vitest, 4 Chrome and 66 stock OpenFGA) plus the same six scenarios, lint and build. The C4 probe is discovered only in the temporary checkout.
+The C4 probe is discovered only in the temporary checkout.
+
+### Model ordering, batch preferences, and query inputs
+
+The second Copilot repair adds 12 stock-engine cases to the existing focused browser files. The [publication cases](publication-findings.engine.pw.ts) distinguish escaped CEL literal spaces through real Publish, lost-reply recovery, source suggestions, fixture reuse, and Check. The [draft cases](draft-findings.engine.pw.ts) order real provider retries and acknowledgments across two ordinary auto-publishes, with a historical selection control. The [batch cases](batch-findings.engine.pw.ts) withhold real fixture and report replies after commit and verify user preferences after reload. The [query cases](query-findings.engine.pw.ts) compare alternate-only ListObjects and ListUsers results with known omitted candidates, verify the captured follow-up Check, and exercise scalar, represented, nested, malformed, and out-of-range durations against stock OpenFGA.
+
+The isolated inventory is 98 standard runner cases (16 Vitest, 4 Chrome and 78 stock OpenFGA) plus the six C4 scenarios. Full qualification has 114 standard runner cases (32 Vitest, 4 Chrome and 78 stock OpenFGA) plus the same six scenarios, lint and build.
 
 ## Synthetic data and transport
 

@@ -6,7 +6,7 @@ import {
   routeGrant, setDraft, toYaml, workspace, writeEngine, type FixtureTarget,
 } from "./finding-helpers";
 import { armTransport, capturedRequests, clearTraffic, postToEngine } from "./workbench-fixtures";
-import type { Tuple, WorkspaceView } from "@/lib/workbench-contract";
+import type { Batch, Tuple, WorkspaceView } from "@/lib/workbench-contract";
 
 const conditionalDsl = baseDsl.replace("define viewer: [user]", "define viewer: [user, user with region_guard]")
   + '\n\ncondition region_guard(region: string) {\n  region != ""\n}\n';
@@ -260,4 +260,91 @@ test("C2 Publish reports an invalid addition and leaves the planned deletion and
   expect(await observedTuple(request, target)).toEqual([{ ...routeGrant, condition: null }]);
   expect(await engineAllows(request, previous, routeGrant)).toBe(true);
   expect(await engineAllows(request, target, companionGrant)).toBe(true);
+});
+
+/** CEL keeps the three quoted characters after the escape and the spaces that follow them. */
+function escapedLiteralModel(marker: string, spaces: string, operatorSpacing = " ") {
+  return baseDsl.replace("define viewer: [user]", "define viewer: [user with exact_text]")
+    + "\n\ncondition exact_text(label: string) {\n  label" + operatorSpacing + "==" + operatorSpacing
+    + String.raw`"""before\"""` + spaces + marker + '"""\n}\n';
+}
+
+/** Ask the pinned engine to evaluate the given literal under one explicit revision. */
+async function checkLiteral(request: APIRequestContext, target: FixtureTarget, label: string) {
+  const result = await postToEngine(request, target.path + "/check", {
+    authorization_model_id: target.revision, tuple_key: routeGrant, context: { label },
+  });
+  return result.allowed;
+}
+
+test("C5 ordinary Publish distinguishes escaped triple-literal spaces, recovers a lost reply and reuses formatting", async ({ page, request }) => {
+  const marker = "publish_spelling";
+  const original = escapedLiteralModel(marker, " ");
+  const changed = escapedLiteralModel(marker, "  ");
+  const target = await policyFixture(request, "Escaped CEL Publish", original,
+    [{ ...routeGrant, condition: { name: "exact_text" } }]);
+  const oldLabel = 'before""" ' + marker;
+  const newLabel = 'before"""  ' + marker;
+  expect(await checkLiteral(request, target, oldLabel)).toBe(true);
+  expect(await checkLiteral(request, target, newLabel)).toBe(false);
+  await setDraft(request, target, { dsl: original, validDsl: original }, { autoSave: false, autoPublish: false });
+  await openTarget(page, target, "model");
+  const editor = page.getByRole("textbox", { name: "OpenFGA authorization model" });
+  const publish = page.getByRole("button", { name: "Publish", exact: true });
+  const modelPath = target.path + "/authorization-models";
+  await clearTraffic(request);
+  await armTransport(request, [{ path: modelPath, kind: "drop-success" }]);
+  await editor.fill(changed);
+  await publish.click();
+  await expect(page.getByText("Model published", { exact: true })).toBeVisible();
+  const selected = boundDraft(await workspace(request), target).published!;
+  expect.soft(selected, "one extra space inside the literal changes the installed model").not.toBe(target.revision);
+  expect.soft(await capturedRequests(request, modelPath), "the dropped reply is recovered without a duplicate write").toHaveLength(1);
+  expect.soft(await checkLiteral(request, { ...target, revision: selected }, newLabel)).toBe(true);
+  expect.soft(await checkLiteral(request, { ...target, revision: selected }, oldLabel)).toBe(false);
+
+  await clearTraffic(request);
+  await editor.fill(escapedLiteralModel(marker, "  ", "   "));
+  const formattingReceipt = page.waitForResponse((response) => {
+    const sent = response.request();
+    return sent.method() === "POST" && new URL(sent.url()).pathname === "/api/workbench"
+      && sent.postDataJSON()?.action === "publish-model";
+  });
+  await publish.click();
+  expect((await formattingReceipt).ok()).toBe(true);
+  await expect(publish).toBeEnabled();
+  await expect(page.getByText("Model published", { exact: true })).toBeVisible();
+  expect(boundDraft(await workspace(request), target).published).toBe(selected);
+  expect(await capturedRequests(request, modelPath)).toEqual([]);
+});
+
+test("C5 source suggestions and a reused fixture distinguish escaped triple-literal contents", async ({ request }) => {
+  const marker = "fixture_spelling";
+  const first = escapedLiteralModel(marker, " ");
+  const second = escapedLiteralModel(marker, "  ");
+  const source = await policyFixture(request, "Escaped CEL source", first);
+  const { authorization_model_id: newer } = await postToEngine(request, source.path + "/authorization-models",
+    transformer.transformDSLToJSONObject(second));
+  const initial = { store: source.store, revision: source.revision };
+  const revised = { store: source.store, revision: newer };
+  expect.soft(await appCommand(request, { action: "suggest-model", dsl: second })).toEqual({ match: revised });
+  const batch: Batch = { id: crypto.randomUUID(), name: "Literal fixture revisions",
+    tuples: [{ ...routeGrant, condition: { name: "exact_text" } }], cases: [] };
+  const { state } = await workspace(request);
+  await appCommand(request, { action: "save", state: { ...state, batches: [...state.batches, batch] } });
+  const stage = async (source: typeof revised) => {
+    const response = await appCommand<Receipt>(request, { action: "fixture", batchId: batch.id, source,
+      revision: (await workspace(request)).state.revision });
+    expect(response.failure).toBeUndefined();
+    const binding = response.state.batches.find(({ id }) => id === batch.id)?.installations?.[response.endpoint];
+    expect(binding?.source).toEqual(source);
+    expect(binding?.fixture).toBeDefined();
+    return { ...binding!.fixture!, path: "/stores/" + binding!.fixture!.store };
+  };
+  const oldFixture = await stage(initial);
+  expect(await checkLiteral(request, oldFixture, 'before""" ' + marker)).toBe(true);
+  const newFixture = await stage(revised);
+  expect(newFixture.store).toBe(oldFixture.store);
+  expect.soft(newFixture.revision).not.toBe(oldFixture.revision);
+  expect(await checkLiteral(request, newFixture, 'before"""  ' + marker)).toBe(true);
 });

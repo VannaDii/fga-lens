@@ -5,7 +5,7 @@ import {
   routeGrant, setDraft, toYaml, writeEngine,
 } from "./finding-helpers";
 import {
-  armTransport, capturedRequests, clearTraffic, installFixture, memberThroughParent, storedTuples,
+  armTransport, capturedRequests, clearTraffic, installFixture, memberThroughParent, postToEngine, storedTuples,
 } from "./workbench-fixtures";
 import type { Tuple } from "@/lib/workbench-contract";
 
@@ -234,5 +234,176 @@ test("F10 alternate-first compare cannot switch a manually edited expectation so
     }
   } finally {
     await gateState(request, gate);
+  }
+});
+
+const testOverlay = { user: "user:temporary_overlay", object: "document:separate_overlay", relation: "viewer" };
+
+/** Set up a known absent identity and an alternate-only conditional grant in two actual stores. */
+async function openListComparison(page: Page, request: APIRequestContext, label: string, alternateGrant: Tuple, known: string) {
+  const primary = await policyFixture(request, label + " primary", contextDsl, [routeGrant]);
+  const alternate = await policyFixture(request, label + " alternate", contextDsl, [alternateGrant]);
+  await setDraft(request, primary, { yaml: toYaml([routeGrant, testOverlay]), baseline: [routeGrant], inventory: [known] },
+    { autoSave: false, autoPublish: false, resetSelections: true });
+  await openTarget(page, primary, "queries");
+  await page.getByRole("checkbox", { name: "Compare", exact: true }).check();
+  await page.getByRole("combobox", { name: "Alternate store", exact: true }).selectOption(alternate.store);
+  await page.getByRole("combobox", { name: "Alternate revision", exact: true }).selectOption(alternate.revision);
+  await enterCondition(page, "west");
+  await page.getByRole("checkbox", { name: testOverlay.user + " · " + testOverlay.relation + " · " + testOverlay.object }).check();
+  return { primary, alternate };
+}
+
+/** Check each available identity on the captured alternate side without replacing its list. */
+async function inspectAlternate(page: Page, request: APIRequestContext, targets: Awaited<ReturnType<typeof openListComparison>>,
+  primaryIdentity: string, returned: { id: string; tuple: Tuple }, omitted: { id: string; tuple: Tuple }) {
+  const { primary, alternate } = targets;
+  const primarySide = page.getByRole("article").filter({ hasText: primary.revision });
+  const side = page.getByRole("article").filter({ hasText: alternate.revision });
+  const list = side.getByRole("list").getByRole("listitem");
+  await expect(list).toHaveText([returned.id]);
+  await expect(primarySide.getByRole("listitem")).toHaveText([primaryIdentity]);
+  const primaryOptions = await primarySide.getByRole("combobox", { name: /^Inspect list entry/ }).getByRole("option")
+    .evaluateAll((entries) => entries.map((entry) => (entry as HTMLOptionElement).value));
+  expect(primaryOptions).toContain(primaryIdentity);
+  expect(primaryOptions).not.toContain(returned.id);
+  const picker = side.getByRole("combobox", { name: /^Inspect list entry/ });
+  const options = await picker.getByRole("option").evaluateAll((entries) => entries.map((entry) => (entry as HTMLOptionElement).value));
+  expect.soft(options, "the alternate side offers its own returned identity").toContain(returned.id);
+  expect(options, "the eligible known identity remains available after its omission").toContain(omitted.id);
+  await page.getByRole("textbox", { name: /^region/i }).fill("outside");
+  const condition = { name: "region_guard" };
+  await writeEngine(request, alternate, { writes: { tuple_keys: [{ ...omitted.tuple, condition }] } });
+  const inspect = async (entry: typeof returned) => {
+    await clearTraffic(request);
+    await picker.selectOption(entry.id);
+    await side.getByRole("button", { name: "Check entry", exact: true }).click();
+    const summary = side.getByText("Evidence", { exact: true });
+    if (await summary.locator("..").getAttribute("open") === null) await summary.click();
+    await expect(side.getByText(/Selected-entry Check · .*allowed/i)).toBeVisible();
+    expect((await capturedRequests(request, alternate.path + "/check"))[0]).toEqual({
+      authorization_model_id: alternate.revision, tuple_key: entry.tuple,
+      context: { region: "west" }, contextual_tuples: { tuple_keys: [testOverlay] },
+    });
+    expect(await capturedRequests(request, primary.path + "/check")).toEqual([]);
+    await expect(list).toHaveText([returned.id]);
+  };
+  // A missing picker entry is the baseline failure. Always execute the independent known-omission control.
+  if (options.includes(returned.id)) await inspect(returned);
+  await inspect(omitted);
+}
+
+test("C8 ListObjects comparison can inspect its alternate-only result and a known omission", async ({ page, request }) => {
+  const returned = { ...routeGrant, object: "document:alternate_only" };
+  const omitted = { ...routeGrant, object: "document:known_omission" };
+  const targets = await openListComparison(page, request, "ListObjects identities",
+    { ...returned, condition: { name: "region_guard" } }, omitted.object);
+  await page.getByRole("combobox", { name: "Operation", exact: true }).selectOption("list-objects");
+  await page.getByRole("combobox", { name: "View as", exact: true }).selectOption(routeGrant.user);
+  await page.getByRole("combobox", { name: "Object type", exact: true }).selectOption("document");
+  await page.getByRole("combobox", { name: "Relation", exact: true }).selectOption("viewer");
+  await run(page).click();
+  await inspectAlternate(page, request, targets, routeGrant.object, { id: returned.object, tuple: returned }, { id: omitted.object, tuple: omitted });
+});
+
+test("C8 ListUsers comparison can inspect its alternate-only result and a known omission", async ({ page, request }) => {
+  const returned = { ...routeGrant, user: "user:alternate_only" };
+  const omitted = { ...routeGrant, user: "user:known_omission" };
+  const targets = await openListComparison(page, request, "ListUsers identities",
+    { ...returned, condition: { name: "region_guard" } }, omitted.user);
+  await page.getByRole("combobox", { name: "Operation", exact: true }).selectOption("list-users");
+  await page.getByRole("combobox", { name: "Object", exact: true }).selectOption(routeGrant.object);
+  await page.getByRole("combobox", { name: "Relation", exact: true }).selectOption("viewer");
+  await page.getByRole("combobox", { name: "User type or userset", exact: true }).selectOption("user");
+  await run(page).click();
+  await inspectAlternate(page, request, targets, routeGrant.user, { id: returned.user, tuple: returned }, { id: omitted.user, tuple: omitted });
+});
+
+const durationDsl = baseDsl.replace("define viewer: [user]", "define viewer: [user with elapsed]")
+  .replace("define editor: [user]", "define editor: [user with elapsed]")
+  + '\n\ncondition elapsed(delay: duration) {\n  delay >= duration("0s")\n}\n';
+const durationSpellings = ["0", ".5s", "+1s", "1h2m3.5s", "9223372036854775807ns"];
+
+/** Open a real Check for a conditional grant; only the authored metadata supplies represented values. */
+async function openDurationCheck(page: Page, request: APIRequestContext, name: string, dsl: string, represented: Tuple[] = []) {
+  const grant = { ...routeGrant, condition: { name: "elapsed" } };
+  const target = await policyFixture(request, name, dsl, [grant]);
+  await setDraft(request, target, { yaml: toYaml([grant, ...represented]), baseline: [grant] },
+    { autoSave: false, autoPublish: false, resetSelections: true });
+  await openTarget(page, target, "queries");
+  await selectCheck(page);
+  await page.getByText("Condition context", { exact: true }).click();
+  return target;
+}
+
+/** Observe an actual workbench Check, leaving request serialization independent of the UI form. */
+async function expectDurationCheck(page: Page, request: APIRequestContext,
+  target: Awaited<ReturnType<typeof openDurationCheck>>, context: Record<string, string | string[]>, allowed = true) {
+  const body = { authorization_model_id: target.revision, tuple_key: routeGrant, context };
+  const path = target.path + "/check";
+  await clearTraffic(request);
+  await run(page).click();
+  await expect.configure({ soft: true }).poll(() => capturedRequests(request, path), { timeout: 1250, message: JSON.stringify(context) })
+    .toContainEqual(body);
+  if ((await capturedRequests(request, path)).length) {
+    await expect(page.getByRole("article").getByText(allowed ? "Allowed" : "Denied", { exact: true })).toBeVisible();
+    await expect(run(page)).toBeEnabled();
+  }
+  expect((await postToEngine(request, path, body)).allowed, "stock OpenFGA accepts this exact duration spelling").toBe(allowed);
+}
+
+test("C9 manual duration inputs preserve stock spellings through the actual Check request", async ({ page, request }) => {
+  const target = await openDurationCheck(page, request, "Manual duration spelling", durationDsl);
+  const field = page.getByRole("textbox", { name: /^delay/i });
+  for (const delay of durationSpellings) {
+    await field.fill(delay);
+    await expectDurationCheck(page, request, target, { delay });
+  }
+  const delay = "-9223372036854775808ns";
+  await field.fill(delay);
+  await expectDurationCheck(page, request, target, { delay }, false);
+});
+
+test("C9 represented duration values remain selectable and preserve the exact Check context", async ({ page, request }) => {
+  const advertised = durationSpellings.map((delay, index) => ({ ...companionGrant, object: "document:duration_" + index,
+    condition: { name: "elapsed", context: { delay } } }));
+  const target = await openDurationCheck(page, request, "Represented durations", durationDsl, advertised);
+  const source = page.getByRole("combobox", { name: "delay context source", exact: true });
+  const labels = await source.getByRole("option").allTextContents();
+  expect.soft(labels).toEqual(expect.arrayContaining(durationSpellings.map((duration) => JSON.stringify(duration))));
+  for (const delay of durationSpellings) {
+    const label = JSON.stringify(delay);
+    if (labels.includes(label)) await source.selectOption({ label });
+    else continue; // The missing choice already fails; still run the ordinary spellings on the baseline.
+    await expectDurationCheck(page, request, target, { delay });
+  }
+});
+
+test("C9 nested duration values preserve every element on the wire", async ({ page, request }) => {
+  const dsl = durationDsl.replace('delay: duration', 'samples: list<duration>')
+    .replace('delay >= duration("0s")', 'samples.all(sample, sample >= duration("0s"))');
+  const target = await openDurationCheck(page, request, "Nested duration spelling", dsl);
+  const samples = ["0", ".5s", "+1s", "1s"];
+  await page.getByRole("textbox", { name: /^samples/i }).fill(JSON.stringify(samples));
+  await expectDurationCheck(page, request, target, { samples });
+});
+
+test("C9 malformed and overflowing duration inputs identify the field before dispatch", async ({ page, request }) => {
+  const target = await openDurationCheck(page, request, "Invalid duration diagnostics", durationDsl);
+  const field = page.getByRole("textbox", { name: /^delay/i });
+  const path = target.path + "/check";
+  const proxy = "http://127.0.0.1:" + (process.env.FGA_TEST_PROXY_PORT ?? "35492");
+  for (const delay of ["not-a-duration", "9223372036854775808ns", "-9223372036854775809ns"]) {
+    await field.fill(delay);
+    await clearTraffic(request);
+    await run(page).click();
+    await expect(run(page)).toBeEnabled();
+    await expect.soft(page.getByRole("status").filter({ hasText: /invalid condition value.*delay/i }))
+      .toBeVisible({ timeout: 1000 });
+    expect.soft(await capturedRequests(request, path), delay).toEqual([]);
+    const rejected = await request.post(proxy + path, { data: {
+      authorization_model_id: target.revision, tuple_key: routeGrant, context: { delay },
+    } });
+    expect(rejected.status(), "stock OpenFGA rejects the exact invalid spelling").toBe(400);
   }
 });
