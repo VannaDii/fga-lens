@@ -259,7 +259,7 @@ test("C1 delayed same-tab Save acknowledges the newer tuple checkpoint without l
     expect((await selectionReply).ok()).toBe(true);
     await expect(editor).toHaveValue(later);
     await expect(revision).toHaveValue(alternate);
-    await expect.soft(page.getByText("In sync", { exact: true }), "the publication checkpoint updates the editor baseline").toBeVisible({ timeout: 2500 });
+    await expect.soft(page.getByRole("banner").getByText(/^Tuples · In sync · \S/), "the publication checkpoint updates the editor baseline").toBeVisible({ timeout: 2500 });
 
     const nextSave = page.waitForResponse((response) => saveReceipt(response));
     await page.getByRole("button", { name: "Save", exact: true }).click();
