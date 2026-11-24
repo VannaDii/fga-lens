@@ -2,7 +2,7 @@ import { sameTuple, tupleKey, type Draft, type InstalledModel, type Target, type
 import { emptyDraft, publicationConflicts, readYaml, resolveTupleSource, tupleIndex } from "./workbench-drafts";
 import { diagnose, OperationFailure, TuplePlanRejection } from "./workbench-errors";
 import { modelFingerprint, tupleKeyIssues, tupleModelIssues } from "./workbench-models";
-import { endpoint, models, preflightTuplePlan, publishModel, readModel, readTuples, reserve, savedModel, stores, writeTuple } from "./workbench-server";
+import { endpoint, models, preflightTupleAdditions, publishModel, readModel, readTuples, reserve, savedModel, stores, writeTuple } from "./workbench-server";
 import { captureWorkspace, checkpoint, draftKey } from "./workbench-workspace";
 
 /** Apply a publication checkpoint only to the captured draft in the latest workspace. */
@@ -67,7 +67,14 @@ function capturedEdits(saved: Draft, records: Tuple[]) {
 /** Capture the source coordinate of a changed row without duplicating its tuple in any diagnostic. */
 type PlannedTuple = { value: Tuple; row: NonNullable<TupleIssue["row"]>; operation: "add" | "remove" };
 
-/** Validate the exact captured model and all changed rows before the first upstream write. */
+/**
+ * Validate all changed keys and the installed model before the first upstream write.
+ * Only additions must satisfy the captured model's grant restrictions.
+ * @param captured The store and installed revision bound to this attempt.
+ * @param plan The changed additions and removals with their diagnostic source coordinates.
+ * @param signal The publication cancellation signal.
+ * @throws A structured plan rejection for input errors or the underlying operation failure.
+ */
 async function validateCapturedPlan(captured: Target, plan: PlannedTuple[], signal: AbortSignal) {
   const issues: TupleIssue[] = [];
   const checked = plan.map((entry) => ({ ...entry, keys: tupleKeyIssues(entry.value, entry.operation === "remove") }));
@@ -83,19 +90,17 @@ async function validateCapturedPlan(captured: Target, plan: PlannedTuple[], sign
   if (model && !supported) issues.push({ reason: "schema" });
 
   for (const { value, row, operation, keys } of checked) {
-    const details = supported && model ? tupleModelIssues(value, model) : [];
+    const details = operation === "add" && supported && model ? tupleModelIssues(value, model) : [];
     for (const detail of [...keys, ...details.filter(({ reason }) => !keys.some((item) => item.reason === reason))]) {
       issues.push({ ...detail, row, operation });
     }
   }
   if (issues.length) throw new TuplePlanRejection(issues);
 
-  for (const operation of ["remove", "add"] as const) {
-    const rows = plan.filter((entry) => entry.operation === operation);
-    const rejected = await preflightTuplePlan(captured, rows.map(({ value }) => value), signal, operation);
-    for (const { index, reason } of rejected) {
-      issues.push({ reason, operation, ...(index !== undefined ? { row: rows[index].row } : {}) });
-    }
+  const additions = plan.filter((entry) => entry.operation === "add");
+  const rejected = await preflightTupleAdditions(captured, additions.map(({ value }) => value), signal);
+  for (const { index, reason } of rejected) {
+    issues.push({ reason, operation: "add", ...(index !== undefined ? { row: additions[index].row } : {}) });
   }
   if (issues.length) throw new TuplePlanRejection(issues);
 }

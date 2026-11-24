@@ -228,16 +228,14 @@ function contextValueSize(value: Json): number {
 }
 
 /**
- * Validate one side of the publication plan against the installed model before any mutations.
+ * Validate additions against the installed model before any plan mutation.
  * Expand calls ValidateTupleForWrite on every supplied tuple before expanding the selected relation.
  * Both startup modes enforce the stock Write limit on protobuf condition context for additions.
- * Deletions send only tuple keys.
  * @param target The store and installed model captured when publication started.
- * @param records The original or proposed tuple records to validate.
+ * @param records The proposed grants to validate.
  * @param signal The operation cancellation signal.
- * @param operation Whether these records will be removed or added.
  */
-export async function preflightTuplePlan(target: Target, records: Tuple[], signal: AbortSignal, operation: "remove" | "add") {
+export async function preflightTupleAdditions(target: Target, records: Tuple[], signal: AbortSignal) {
   const contextualLimit = 100;
   const batchBudget = 256 * 1024;
   const stockWriteContextLimit = 32 * 1024;
@@ -245,7 +243,7 @@ export async function preflightTuplePlan(target: Target, records: Tuple[], signa
   const measured = records.flatMap((value, index) => {
     const condition = value.condition;
     const contextBytes = condition?.context ? conditionSize(condition.context) : 0;
-    if (operation === "add" && contextBytes > stockWriteContextLimit) {
+    if (contextBytes > stockWriteContextLimit) {
       problems.push({ reason: "conditionSize", index });
       return [];
     }

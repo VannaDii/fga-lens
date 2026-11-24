@@ -2,6 +2,8 @@
 
 The shared workbench holds file state and store selection across the four screens. Model uses the original FGA Lens editor and React Flow canvas. Instances edits tuple YAML and the concrete graph. A fetch can merge only when both the live editor and saved draft are valid. The editor remains writable during remote reads and briefly locks during the local merge save. Queries captures immutable request data, while Batches stages and executes regression fixtures.
 
+The [workspace state hook](workbench-state.ts) reconciles reordered Save and publication replies. A newer checkpoint can follow a Save only after that tab's successful Save reply proves ownership of the same authored revision. The checkpoint then merges server-owned fields into the live buffer and makes the newer revision available to the next Save.
+
 The [workbench header](workbench.tsx) groups the primary store and model revision with connection and settings. Model and Instances show their own actions and last sync check after Publish. Queries keeps its comparison controls and Batches keeps its fixture actions in their screens. The header scrolls with the page on narrow screens to keep the editors reachable.
 
 The [Instances relationship map](workbench-instance-graph.tsx) places concrete `parent` tuples in lanes from subject to object. Other outgoing tuples appear in Direct assignments, including for a focus with parents or children. Role labels group distinct assignees under the owning resource. Every action opens one exact tuple, including its full userset subject when present. The direct tuple disclosure lists raw IDs and directions. The [Instances screen](workbench-instances.tsx) keeps the store-scoped focus, source jump and keyboard focus return.

@@ -14,12 +14,19 @@ const recovery = resolve(directory, "workspace.recovery.json");
 const backup = resolve(directory, "workspace.recovery.backup.json");
 let workspaceQueue = Promise.resolve();
 
-/** Read and decode a persisted snapshot, distinguishing missing and damaged files. */
+/**
+ * Read a snapshot without replacing malformed UTF-8 or treating read failures as corruption.
+ * @param path The original workspace, recovery file, or backup.
+ * @returns Whether the file was found and its validated state if readable.
+ * @throws Filesystem errors other than a missing file.
+ */
 async function readWorkspaceFile(path: string) {
   try {
-    const bytes = await readFile(path, "utf8");
-    try { return { found: true, state: decode(workspace, JSON.parse(bytes)) }; }
-    catch { return { found: true, state: null }; }
+    const bytes = await readFile(path);
+    try {
+      const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+      return { found: true, state: decode(workspace, JSON.parse(text)) };
+    } catch { return { found: true, state: null }; }
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return { found: false, state: null };
     throw error;

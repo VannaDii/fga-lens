@@ -11,7 +11,7 @@ const grpcPort = process.env.FGA_TEST_GRPC_PORT ?? "35493";
 const appUrl = "http://127.0.0.1:" + appPort;
 const upstreamUrl = "http://127.0.0.1:" + proxyPort;
 
-/** Browser coverage uses installed Chrome and disposable loopback services. */
+/** Browser coverage uses installed Chrome and disposable loopback services and workspaces. */
 export default defineConfig({
   testDir: "tests",
   testMatch: integration ? "**/*.engine.pw.ts" : "**/*.chrome.pw.ts",
@@ -44,8 +44,9 @@ export default defineConfig({
         ]
       : []),
     {
-      command: "npm run dev -- --hostname 127.0.0.1 --port " + appPort,
+      command: "node scripts/playwright-next.mjs",
       env: {
+        FGA_TEST_APP_PORT: appPort,
         NEXT_TELEMETRY_DISABLED: "1",
         OPENFGA_API_URL: upstreamUrl,
         OPENFGA_PRESHARED_KEY: "",
