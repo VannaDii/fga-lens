@@ -259,7 +259,11 @@ test("C1 delayed same-tab Save acknowledges the newer tuple checkpoint without l
     expect((await selectionReply).ok()).toBe(true);
     await expect(editor).toHaveValue(later);
     await expect(revision).toHaveValue(alternate);
-    await expect.soft(page.getByRole("banner").getByText(/^Tuples · In sync · \S/), "the publication checkpoint updates the editor baseline").toBeVisible({ timeout: 2500 });
+    const tupleInfo = page.getByRole("button", { name: "Tuple sync information", exact: true });
+    await tupleInfo.click();
+    await expect.soft(page.getByRole("region", { name: "Tuple sync", exact: true }).getByText(/^Tuples · In sync · \S/),
+      "the publication checkpoint updates the editor baseline").toBeVisible({ timeout: 2500 });
+    await tupleInfo.click();
 
     const nextSave = page.waitForResponse((response) => saveReceipt(response));
     await page.getByRole("button", { name: "Save", exact: true }).click();
@@ -390,7 +394,7 @@ test("C6 delayed older provider and browser receipts keep the newest publication
   const { authorization_model_id: historical } = await postToEngine(request, target.path + "/authorization-models",
     transformer.transformDSLToJSONObject(anchor));
   await page.reload();
-  await expect(revision.getByRole("option", { name: historical, exact: true })).toHaveCount(1);
+  await expect(revision.locator('option[value="' + historical + '"]')).toHaveCount(1);
   await revision.selectOption(historical);
   await expect.poll(async () => (await workspace(request)).state.model).toBe(historical);
 

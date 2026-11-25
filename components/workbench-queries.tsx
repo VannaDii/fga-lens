@@ -10,7 +10,7 @@ import {
 import { readYaml, tupleIndex } from "@/lib/workbench-drafts";
 import { contextValue, inspectableListEntry, invalidContext, parameters } from "@/lib/workbench-models";
 import { queryPath, queryRequest } from "@/lib/workbench-query-request";
-import { Dialog, failureText, invoke, JobStatus, Select } from "./workbench-ui";
+import { Dialog, failureText, invoke, JobStatus, revisionOptions, Select } from "./workbench-ui";
 
 /** All result presentation fields belong to the request captured at dispatch. */
 type Captured = {
@@ -228,7 +228,7 @@ export function QueryScreen({ draft, target, model, storeList, batches, selectio
 
   return <main className="wb-split">
     <section className="wb-pane wb-form">
-      <h1>Query request</h1>
+      <header className="wb-pane-heading"><h1>Query request</h1></header>
       <Select label="Operation" value={operation} options={operations} change={(operation) => {
         if (operation) remember({ operation });
       }} />
@@ -259,7 +259,7 @@ export function QueryScreen({ draft, target, model, storeList, batches, selectio
         <Select label="Alternate store" value={alternateStore}
           options={storeList.map((store) => ({ value: store.id, label: store.name }))}
           change={(store) => { setAlternateModels([]); remember({ alternateStore: store, alternateRevision: "" }); }} />
-        <Select label="Alternate revision" value={alternateRevision} options={alternateModels.map((model) => model.id)}
+        <Select label="Alternate revision" value={alternateRevision} options={revisionOptions(alternateModels)} title={alternateRevision || undefined}
           change={(alternateRevision) => remember({ alternateRevision })} />
       </div>}
       <div className="wb-actions">
@@ -269,7 +269,7 @@ export function QueryScreen({ draft, target, model, storeList, batches, selectio
       {message && <p role="status">{message}</p>}
     </section>
     <section className="wb-pane">
-      <h2>Result</h2>
+      <header className="wb-pane-heading"><h2>Result</h2></header>
       <div className="wb-results" aria-live="polite">{captured.map((side, index) => <article key={index}>
         <div className="wb-target-ids"><code>{side.target.store}</code><code>{side.target.revision}</code></div>
         <details><summary>API request</summary>

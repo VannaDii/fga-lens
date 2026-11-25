@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as t from "io-ts";
+import { X } from "lucide-react";
 
-import { decode, failure, progress, tupleRejection, type Failure, type TupleIssue } from "@/lib/workbench-contract";
+import { decode, failure, progress, tupleRejection, type Failure, type InstalledModel, type TupleIssue } from "@/lib/workbench-contract";
 
 const address = "/api/workbench";
 
@@ -64,7 +65,7 @@ export function JobStatus({ id, label, unit }: { id: string; label: string; unit
 }
 
 /** A native dialog provides focus trapping, Escape dismissal and trigger focus return. */
-export function Dialog({ title, children, close }: { title: string; children: ReactNode; close: () => void }) {
+export function Dialog({ title, children, close, iconClose }: { title: string; children: ReactNode; close: () => void; iconClose?: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const trigger = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -81,9 +82,15 @@ export function Dialog({ title, children, close }: { title: string; children: Re
     };
   }, []);
   return <dialog ref={dialog} aria-label={title} onClose={close}>
-    <header className="wb-actions"><h2>{title}</h2><button type="button" onClick={() => dialog.current?.close()}>Close</button></header>
+    <header className="wb-actions"><h2>{title}</h2><button type="button" aria-label="Close" className={iconClose ? "wb-icon-button" : undefined}
+      onClick={() => dialog.current?.close()}>{iconClose ? <X size={18} aria-hidden /> : "Close"}</button></header>
     {children}
   </dialog>;
+}
+
+/** Label installed revisions from oldest to newest within each store. Preserve the exact server IDs. */
+export function revisionOptions(models: InstalledModel[]) {
+  return models.map((model, index) => ({ value: model.id, label: "Version " + (models.length - index) }));
 }
 
 /** A labelled native selector with optional display names and a full-value tooltip. */

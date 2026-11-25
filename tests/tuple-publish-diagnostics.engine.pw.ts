@@ -148,7 +148,7 @@ test("tuple Publish identifies every missing relation at its YAML source and suc
     transformer.transformDSLToJSONObject(compatibleDsl));
   const revisionControl = page.getByRole("combobox", { name: "Model revision", exact: true });
   await page.reload();
-  await expect(revisionControl.getByRole("option", { name: revision, exact: true })).toHaveCount(1);
+  await expect(revisionControl.locator('option[value="' + revision + '"]')).toHaveCount(1);
   await expect(revisionControl).toHaveValue(older.revision);
   const yaml = [
     "# Existing grant and a valid new addition before the first error.",
@@ -314,13 +314,17 @@ test("F13 a rejected tuple Publish stays with its originating store after switch
 test("F13 tuple Publish distinguishes the current success counts from earlier counts after a blocked attempt", async ({ page, request }) => {
   const target = await openPublishedDraft(page, request, "Tuple completion attribution");
   const main = page.getByRole("main");
-  const completed = main.getByText(/\b1 completed\s*·\s*0 pending\b/i);
+  const info = page.getByRole("button", { name: "Tuple sync information", exact: true });
+  const completed = page.getByRole("region", { name: "Tuple sync", exact: true }).getByText(/\b1 completed\s*·\s*0 pending\b/i);
+  await info.click();
   await expect(completed).toBeVisible();
   await feedback(completed, "the counts belong to the current successful Publish")
     .toContainText(/\b(?:this attempt|current (?:attempt|publish|result)|just.completed|tuple changes published)\b/i);
 
+  await info.click();
   const invalid = toYaml([routeGrant, companionGrant, reviewer]);
   await rejectDraft(page, request, target, invalid, reviewer, "relation");
+  await info.click();
   await expect(main.getByText(/\bno tuple writes (?:were )?made\b/i)).toBeVisible();
   await expect(completed).toContainText(/\b(?:previous|prior|earlier|historical|last successful)\b/i);
 });

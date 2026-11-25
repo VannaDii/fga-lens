@@ -43,7 +43,7 @@ test("Access Review opens at its workbench route and appears after Queries", asy
   expect(labels.indexOf("Access Review")).toBe(labels.indexOf("Queries") + 1);
   await expect(page.getByRole("combobox", { name: "Store", exact: true })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Model revision", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: /^(Connected|Offline)$/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Settings", exact: true })).toHaveAccessibleDescription(/^(Connected|Offline)$/);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
   await expect(organization(page)).toBeVisible();
   await expect(viewAs(page)).toBeVisible();
@@ -680,6 +680,7 @@ test("AR05 rejects a later real Read page and marks any retained identical revie
     await selectReview(page, editor);
     const entry = await exposeLaunch(page);
     await expectVerdict(entry, "Edit", "Allowed");
+    await expect(page.getByRole("status").filter({ hasText: / · 0 unfinished$/ })).toBeVisible();
     await clearTraffic(request);
 
     const discovery = appReply(page, "access-review-catalog", (payload) =>

@@ -19,8 +19,9 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 
+import { SourceEditor } from "./source-editor";
 import { ModelGraphCanvas } from "@/components/model-graph";
 import {
   defaultModel,
@@ -181,8 +182,6 @@ function ModelEditor({
   workspace: boolean;
   editor: React.RefObject<HTMLTextAreaElement | null>;
 }) {
-  const [scroll, setScroll] = useState({ left: 0, top: 0 });
-  const lines = modelText.split("\n");
   const diagnosticLines = new Set(diagnostics.map((diagnostic) => diagnostic.line));
   const isChanged = modelText !== defaultModel;
 
@@ -216,7 +215,6 @@ function ModelEditor({
     <div className="live-editor">
       <div className="code-toolbar">
         <div className="editor-file">
-          <span className="window-dots" aria-hidden="true"><i /><i /><i /></span>
           <span>authorization-model.fga</span>
         </div>
         <div className="editor-actions">
@@ -239,42 +237,12 @@ function ModelEditor({
         </span>
       </div>
 
-      <div className="editor-surface">
-        <pre
-          className="editor-highlight"
-          aria-hidden="true"
-          style={{ transform: `translate(${-scroll.left}px, ${-scroll.top}px)` }}
-        >
-          {lines.map((line, index) => {
-            const lineNumber = index + 1;
-            return (
-              <span
-                className={`editor-row ${selectedLine === lineNumber ? "highlighted" : ""} ${diagnosticLines.has(lineNumber) ? "diagnostic" : ""}`}
-                key={`${lineNumber}-${line}`}
-              >
-                <span className="editor-line-number">{lineNumber}</span>
-                <code>{highlightModelLine(line || " ")}</code>
-              </span>
-            );
-          })}
-        </pre>
-        <textarea
-          aria-label="OpenFGA authorization model"
-          ref={editor}
-          autoCapitalize="off"
-          autoCorrect="off"
-          onChange={(event) => onChange(event.target.value)}
-          onClick={(event) => selectCurrentLine(event.currentTarget)}
-          onKeyDown={handleKeyDown}
-          onKeyUp={(event) => selectCurrentLine(event.currentTarget)}
-          onScroll={(event) =>
-            setScroll({ left: event.currentTarget.scrollLeft, top: event.currentTarget.scrollTop })
-          }
-          spellCheck={false}
-          value={modelText}
-          wrap="off"
-        />
-      </div>
+      <SourceEditor aria-label="OpenFGA authorization model" ref={editor} value={modelText}
+        paintLine={highlightModelLine} selectedLine={selectedLine} diagnosticLines={diagnosticLines}
+        onChange={(event) => onChange(event.target.value)}
+        onClick={(event) => selectCurrentLine(event.currentTarget)}
+        onKeyDown={handleKeyDown}
+        onKeyUp={(event) => selectCurrentLine(event.currentTarget)} />
 
       <div className="editor-footer">
         <span>{graph.schemaVersion} · {graph.types.length} types · {graph.relationCount} relations</span>
@@ -413,8 +381,9 @@ function RelationInspector({ relation, onClose, onSource }: {
 }
 
 /** Render the existing editor and graph with either a file workspace or legacy standalone storage. */
-export function FgaLens({ draft, onDraft, relationId, onRelation }: {
+export function FgaLens({ draft, onDraft, relationId, onRelation, actions }: {
   draft?: { dsl: string; validDsl: string };
+  actions?: ReactNode;
   /** Save the current input and newest valid source independently. */
   onDraft?: (dsl: string, validDsl?: string) => void;
   /** Optional relation selection restored from the file workspace. */
@@ -563,13 +532,11 @@ export function FgaLens({ draft, onDraft, relationId, onRelation }: {
 
       <div className={`studio-workspace ${graphExpanded ? "graph-expanded" : ""}`}>
         <aside className="model-pane">
-          <div className="pane-heading">
-            <div><span>Source</span><h1>Authorization model</h1></div>
-            <div className="pane-heading-actions">
-              <ExampleModelPicker modelText={modelText} onSelect={loadSample} />
-              <span className="live-label"><i /> live</span>
-            </div>
-          </div>
+          <header className="pane-heading">
+            <h1>Authorization model</h1>
+            <ExampleModelPicker modelText={modelText} onSelect={loadSample} />
+            {actions}
+          </header>
           <ModelEditor
             diagnostics={parsed.diagnostics}
             editor={editor}
@@ -586,7 +553,7 @@ export function FgaLens({ draft, onDraft, relationId, onRelation }: {
           <div className="graph-toolbar">
             <div>
               <span className="graph-title-icon"><GitFork size={15} /></span>
-              <div><span>Live topology</span><h2>Model graph</h2></div>
+              <h2>Model graph</h2>
             </div>
             <div className="graph-stats">
               <span><strong>{graph.types.length}</strong> types</span>

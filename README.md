@@ -28,7 +28,9 @@ The launcher migrates SQLite in `.fga-workspace/` and starts Next.js after OpenF
 
 ## Workspace
 
-Model and Instances edits save locally by default. Auto-publish is off initially and is configurable in Settings. The workbench keeps store-specific source, tuple drafts and baselines. Queries use the selected installed model, published tuples and any explicitly selected contextual tuples. Opening the root URL restores the most recently saved screen.
+Model and Instances edits save locally by default. Auto-publish is off initially and is configurable in Settings. The workbench keeps store-specific source, tuple drafts and baselines. Queries use the selected installed model, published tuples and any explicitly selected contextual tuples. Opening the root URL restores the most recently saved screen. Settings remembers the workspace appearance. **System** follows the device theme.
+
+Model revision selectors number installed revisions within each store, starting with the oldest. The selector tooltip and query results show the exact OpenFGA ID. On Instances, the info button beside the heading shows the tuple sync time and last publication counts.
 
 **Fetch store tuples** preserves the previous baseline and fetch time if either the current or saved Tuple YAML cannot merge. The editor shows the cause and its source location. Correct the indicated YAML, save it, then fetch again. **Publish** checks the intended additions, replacements and removals against the selected installed model before making any tuple writes.
 

@@ -41,124 +41,133 @@ async function prepareSyncedEditors(page: Page, request: APIRequestContext, fixt
   await expect.poll(async () => boundDraft(await workspace(request), target).tuplesChecked).toBeTruthy();
 }
 
-/** Measure the contextual status independently of the implementation's markup and classes. */
-async function expectWideHeader(page: Page, actions: string[], currentSync: RegExp, otherSync: RegExp) {
+/** The shared navigation keeps selectors and one Settings entry across screens. */
+async function expectNavigation(page: Page) {
   const banner = header(page);
-  await expect(banner).toBeVisible();
-  const controls = ["Store", "Model revision"].map((name) => selector(banner, name));
-  controls.push(...actions.map((name) => button(banner, name)));
-  for (const control of controls) await layout(control).toBeVisible();
-
-  for (const name of ["Store", "Model revision"]) await layout(selector(page, name)).toHaveCount(1);
-  for (const name of actions) await layout(button(page, name)).toHaveCount(1);
-  await layout(page.getByText("Target details", { exact: true })).toHaveCount(0);
-
-  const status = banner.getByText(syncedAt(currentSync));
-  await layout(status).toBeVisible();
-  await layout(page.getByText(currentSync)).toHaveCount(1);
-  await layout(page.getByText(otherSync)).toHaveCount(0);
-
-  if (await status.count() === 1 && await button(banner, "Publish").count() === 1) {
-    expect(await status.evaluate((element) => element.closest("button, [role=button]") === null)).toBe(true);
-    for (const control of controls) {
-      if (await control.count() !== 1) continue;
-      const precedes = await status.evaluate((element, other) =>
-        Boolean(element.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_PRECEDING),
-      await control.elementHandle());
-      expect(precedes, "contextual controls precede the sync status").toBe(true);
-    }
-    const publishBox = await button(banner, "Publish").boundingBox();
-    const statusBox = await status.boundingBox();
-    expect(publishBox).not.toBeNull();
-    expect(statusBox).not.toBeNull();
-    if (!publishBox || !statusBox) return;
-    const gap = statusBox.x - (publishBox.x + publishBox.width);
-    expect(gap, "sync is to the right of Publish without overlapping it").toBeGreaterThanOrEqual(-1);
-    expect(gap, "sync stays visually close to Publish").toBeLessThan(publishBox.height * 2);
-    expect(Math.abs(statusBox.y + statusBox.height / 2 - publishBox.y - publishBox.height / 2))
-      .toBeLessThan(publishBox.height / 2);
+  for (const name of ["Store", "Model revision"]) await expect(selector(banner, name)).toBeVisible();
+  await expect(button(banner, "Settings")).toHaveAccessibleDescription("Connected");
+  for (const name of [...instancesActions, "Connected", "Save", "Publish"]) {
+    await expect(button(banner, name)).toHaveCount(0);
   }
+  await expect(page.getByText("Target details", { exact: true })).toHaveCount(0);
 }
 
-/** Verify both shared entry points and Escape dismissal. */
-async function openHeaderSettings(page: Page, entry: "Connected" | "Settings") {
-  const banner = header(page);
-  await expect(button(banner, "Connected")).toBeVisible();
-  await expect(button(banner, "Settings")).toBeVisible();
-  await button(banner, entry).click();
-  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("Connection", { exact: true })).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(dialog).toBeHidden();
+function paneHeader(page: Page, name: string) {
+  return page.locator("header").filter({ has: page.getByRole("heading", { name, exact: true }) });
 }
 
-test("Model places one target, model Save and Publish, and only model sync in the header", async ({ page, request }) => {
-  await prepareSyncedEditors(page, request, "Model toolbar arrangement");
+test("the model header holds Save and Publish with the sync time beside Publish", async ({ page, request }) => {
+  await prepareSyncedEditors(page, request, "Model pane controls");
   await page.getByRole("link", { name: "Model", exact: true }).click();
+  await expectNavigation(page);
 
-  await openHeaderSettings(page, "Settings");
-  for (const name of instancesActions) await expect(button(page, name)).toHaveCount(0);
-  await expectWideHeader(page, ["Save", "Publish"], modelSync, tupleSync);
+  const pane = paneHeader(page, "Authorization model");
+  await expect(button(pane, "Save")).toBeVisible();
+  const publish = button(pane, "Publish");
+  const status = pane.getByText(syncedAt(modelSync));
+  await expect(status).toBeVisible();
+  await expect(status.locator("time")).toHaveCount(1);
+  await expect(page.getByText(tupleSync)).toHaveCount(0);
+  const publishBox = await publish.boundingBox();
+  const statusBox = await status.boundingBox();
+  expect(publishBox).not.toBeNull();
+  expect(statusBox).not.toBeNull();
+  if (!publishBox || !statusBox) return;
+  const gap = statusBox.x - (publishBox.x + publishBox.width);
+  expect(gap).toBeGreaterThanOrEqual(-1);
+  expect(gap).toBeLessThan(publishBox.height * 2);
+  expect(Math.abs(statusBox.y + statusBox.height / 2 - publishBox.y - publishBox.height / 2))
+    .toBeLessThan(publishBox.height / 2);
 });
 
-test("Instances places its actions in the header and shows only tuple sync", async ({ page, request }) => {
-  await prepareSyncedEditors(page, request, "Instances toolbar arrangement");
-
-  await openHeaderSettings(page, "Connected");
-  await button(page, "New instance").click();
+test("Instances keeps tuple actions in its pane and reveals sync details on request", async ({ page, request }) => {
+  await prepareSyncedEditors(page, request, "Instances pane controls");
+  await expectNavigation(page);
+  const pane = paneHeader(page, "Instances");
+  for (const name of [...instancesActions, "Save", "Publish"]) await expect(button(pane, name)).toBeVisible();
+  const sync = page.getByRole("region", { name: "Tuple sync", exact: true });
+  await expect(sync).toBeHidden();
+  await button(pane, "Tuple sync information").click();
+  await expect(sync.getByText(syncedAt(tupleSync))).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(sync).toBeHidden();
+  await button(pane, "New instance").click();
   const dialog = page.getByRole("dialog", { name: "New instance", exact: true });
   await expect(dialog).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(dialog).toBeHidden();
-  await expectWideHeader(page, [...instancesActions, "Save", "Publish"], tupleSync, modelSync);
+  await expect(button(pane, "New instance")).toBeFocused();
 });
 
-test("the 320px toolbar fits the viewport and editors remain reachable below it", async ({ page, request }) => {
+test("settings combines connection status and appearance controls, and keeps the chosen mode on reload", async ({ page, request }) => {
+  const target = await policyFixture(request, "Workspace appearance");
+  await setDraft(request, target, {}, { resetSelections: true });
+  await openTarget(page, target, "model");
+  const settings = button(header(page), "Settings");
+  await expect(settings).toHaveAccessibleDescription("Connected");
+  await expect(settings.locator("svg")).toBeVisible();
+  await settings.click();
+  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  await expect(button(dialog, "Retry connection").locator("..")).toContainText("Connected");
+  const theme = dialog.getByRole("group", { name: "Appearance" });
+  await expect(button(theme, "System")).toHaveAttribute("aria-pressed", "true");
+  await button(theme, "Dark").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#101a16");
+  const close = button(dialog, "Close");
+  await expect(close.locator("svg")).toBeVisible();
+  await close.click();
+  await expect(settings).toBeFocused();
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await settings.click();
+  await button(theme, "Light").click();
+  await expect(page.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#192822");
+  await button(theme, "System").click();
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(18, 27, 23)");
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(245, 248, 246)");
+});
+
+test("the 320px navigation and pane controls fit and both editors remain reachable", async ({ page, request }) => {
   await page.setViewportSize({ width: 320, height: 680 });
-  await prepareSyncedEditors(page, request, "Narrow editor toolbars");
+  await prepareSyncedEditors(page, request, "Narrow editor panes");
   const editors = [
-    { screen: "Model", editor: "OpenFGA authorization model", status: modelSync },
-    { screen: "Instances", editor: "Tuple YAML", status: tupleSync },
+    { screen: "Model", title: "Authorization model", editor: "OpenFGA authorization model" },
+    { screen: "Instances", title: "Instances", editor: "Tuple YAML" },
   ];
 
-  for (const { screen, editor, status } of editors) {
+  for (const { screen, title, editor } of editors) {
     await page.getByRole("link", { name: screen, exact: true }).click();
     await page.waitForURL("**/" + screen.toLowerCase());
     const source = page.getByRole("textbox", { name: editor, exact: true });
     await expect(source).toBeVisible();
     const banner = header(page);
-    await layout(button(banner, "Publish"), screen + " keeps Publish in the narrow toolbar").toBeVisible();
-    const buttons = banner.getByRole("button");
-    const visibleControls = buttons.or(banner.getByRole("combobox"))
-      .or(banner.getByRole("link")).or(banner.getByText(syncedAt(status)));
-    const bounds = await visibleControls.evaluateAll((elements) => elements
-      .filter((element) => element.getClientRects().length > 0)
-      .map((element) => {
-        const { left, right } = element.getBoundingClientRect();
-        return { left, right, name: element.getAttribute("aria-label") ?? element.textContent };
-      }));
+    const pane = paneHeader(page, title);
+    await layout(button(pane, "Publish"), screen + " keeps Publish in the pane").toBeVisible();
+    const visibleControls = banner.getByRole("button").or(banner.getByRole("combobox"))
+      .or(banner.getByRole("link")).or(pane.getByRole("button"));
+    const bounds = await visibleControls.evaluateAll((elements) => elements.map((element) => {
+      const { left, right } = element.getBoundingClientRect();
+      return { left, right, name: element.getAttribute("aria-label") ?? element.textContent };
+    }));
     for (const { left, right, name } of bounds) {
       expect.soft(left, screen + " left edge of " + name).toBeGreaterThanOrEqual(-1);
       expect.soft(right, screen + " right edge of " + name).toBeLessThanOrEqual(321);
     }
-    const labels = await buttons.evaluateAll((elements) => elements.map((element) => ({
-      fits: element.scrollWidth <= element.clientWidth + 1, name: element.textContent,
-    })));
-    for (const { fits, name } of labels) {
-      expect.soft(fits, screen + " label fits inside " + name).toBe(true);
-    }
     expect.soft(await page.evaluate(() => document.documentElement.scrollWidth), screen + " page width").toBeLessThanOrEqual(321);
-
-    await source.evaluate((element) => element.scrollIntoView({ block: "center" }));
+    if (screen === "Model") {
+      await pane.locator('button[aria-haspopup="menu"]').click();
+      const menu = page.getByRole("menu", { name: "Official OpenFGA sample stores" });
+      await expect(menu).toBeVisible();
+      const rectangle = await menu.boundingBox();
+      expect(rectangle?.x).toBeGreaterThanOrEqual(0);
+      expect((rectangle?.x ?? 320) + (rectangle?.width ?? 320)).toBeLessThanOrEqual(321);
+      await page.keyboard.press("Escape");
+    }
     await source.click();
     await expect(source).toBeFocused();
     await expect(source).toBeEditable();
-    const topOcclusion = await banner.evaluate((element) => {
-      const bounds = element.getBoundingClientRect();
-      return bounds.top <= 1 ? Math.max(0, bounds.bottom) / window.innerHeight : 0;
-    });
-    expect.soft(topOcclusion, screen + " header leaves room to edit after scrolling").toBeLessThanOrEqual(0.26);
   }
 });
 
@@ -168,7 +177,10 @@ test("Queries keeps its comparison selectors and Batches retains its controls", 
   await openTarget(page, target, "queries");
 
   await expect(selector(page, "Store")).toHaveValue(target.store);
-  await expect(selector(page, "Model revision")).toHaveValue(target.revision);
+  const revision = selector(page, "Model revision");
+  await expect(revision).toHaveValue(target.revision);
+  await expect(revision.locator("option:checked")).toHaveText("Version 1");
+  await expect(revision).toHaveAttribute("title", target.revision);
   await page.getByRole("checkbox", { name: "Compare", exact: true }).check();
   await expect(selector(page, "Alternate store")).toBeVisible();
   await expect(selector(page, "Alternate revision")).toBeVisible();

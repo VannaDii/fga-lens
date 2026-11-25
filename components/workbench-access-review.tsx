@@ -221,7 +221,7 @@ function Why({ current, scope, close, panel }: {
   const nested = new Set(scope.edges.map(({ subject, object, relation }) => JSON.stringify([subject, relation, object])));
   const proof = current.evidence?.supporting ?? [];
   return <section className="wb-pane review-why" aria-label="Why" ref={panel}>
-    <header className="wb-actions"><h2>Why</h2><button type="button" onClick={close}>Close</button></header>
+    <header className="wb-pane-heading"><h2>Why</h2><button type="button" onClick={close}>Close</button></header>
     <p><strong>{current.allowed ? "Allowed" : "Denied"}</strong> · {current.subject} · <code>{current.relation}</code> · {current.object}</p>
     <p role="status">{current.evidence?.reason ?? (current.error ? "Reason undetermined" : "Checking relationships…")}</p>
     {current.error && <p>{current.error}</p>}
@@ -400,7 +400,7 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
 
   return <main className="review-page">
     <section className="wb-pane review-controls">
-      <h1>Access Review</h1>
+      <header className="wb-pane-heading"><h1>Access Review</h1></header>
       <div className="wb-actions">
         <Select label="Organization" value={preferences.root ?? ""} options={available.filter((object) => typeOf(object) === preferences.rootType)
           .map((object) => ({ value: object, label: objectLabel(object) }))} title={preferences.root}
@@ -466,13 +466,13 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
       </div>}
     </section>
     {scope && <div className="review-layout">
-      <section className="wb-pane review-chart" aria-label="Access chart"><h2>Access chart</h2>
+      <section className="wb-pane review-chart" aria-label="Access chart"><header className="wb-pane-heading"><h2>Access chart</h2></header>
         <AccessReviewGraph scope={scope} visible={visible} muted={muted} highlighted={highlighted}
           render={(resource) => renderResource(resource, false)} />
         {scope.edges.some(({ subject, object, relation }) => highlighted.has(tupleKey({ user: subject, object, relation }))) &&
           <p className="review-legend">Highlighted links show relationships observed after the check.</p>}
       </section>
-      <section className="wb-pane review-outline" aria-label="Access outline"><h2>Access outline</h2>
+      <section className="wb-pane review-outline" aria-label="Access outline"><header className="wb-pane-heading"><h2>Access outline</h2></header>
         <ul>{visible.map((resource) => <li key={resource.object} data-muted={muted.has(resource.object) || undefined}
           style={{ marginInlineStart: Math.min(resource.depth, 3) * 0.45 + "rem" }}>{renderResource(resource, true)}</li>)}</ul>
       </section>
