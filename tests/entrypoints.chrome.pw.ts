@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { expectContrast } from "./theme-contrast";
 
 /** Require the public route to serve a usable screen before exercising its controls. */
 async function openScreen(page: Page, path: string) {
@@ -28,6 +29,34 @@ test("A11 · Query keeps its direct link and uses the shared content expanders",
   await expect(tuples).toHaveCSS("display", "flex");
   await page.getByRole("link", { name: "Add a local relationship in Instances to try a grant.", exact: true }).click();
   await expect(page).toHaveURL(/\/instances\/?$/);
+});
+
+test("New instance matches the Settings dialog at desktop and phone widths", async ({ page }) => {
+  await openScreen(page, "/instances");
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
+  const create = page.getByRole("button", { name: "New instance", exact: true });
+  const settingsDialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  const createDialog = page.getByRole("dialog", { name: "New instance", exact: true });
+
+  for (const [width, scheme] of [[1440, "dark"], [390, "light"]] as const) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.emulateMedia({ colorScheme: scheme });
+    await settings.click();
+    const settingsClose = settingsDialog.getByRole("button", { name: "Close", exact: true });
+    const settingsWidth = (await settingsDialog.boundingBox())!.width;
+    const settingsCloseWidth = (await settingsClose.boundingBox())!.width;
+    await settingsClose.click();
+
+    await create.click();
+    const close = createDialog.getByRole("button", { name: "Close", exact: true });
+    await expect(close.locator("svg")).toBeVisible();
+    await expect(close).toHaveText("");
+    expect((await createDialog.boundingBox())!.width).toBeCloseTo(settingsWidth, 0);
+    expect((await close.boundingBox())!.width).toBeCloseTo(settingsCloseWidth, 0);
+    await expectContrast(close);
+    await close.click();
+    await expect(create).toBeFocused();
+  }
 });
 
 test("A16 · Batches is directly accessible with fixture and file controls", async ({ page }) => {
@@ -96,15 +125,17 @@ test("the Examples menu uses theme colors for selection, hover, and keyboard foc
   await expect(selected).toHaveAttribute("aria-checked", "true");
 
   const palettes = [
-    { scheme: "dark", selected: "rgb(35, 62, 49)", hover: "rgb(36, 50, 43)", muted: "rgb(174, 189, 181)" },
-    { scheme: "light", selected: "rgb(231, 248, 240)", hover: "rgb(238, 243, 240)", muted: "rgb(102, 113, 109)" },
+    { scheme: "dark", selected: "rgb(36, 52, 90)", muted: "rgb(174, 187, 213)" },
+    { scheme: "light", selected: "rgb(230, 237, 255)", muted: "rgb(77, 94, 123)" },
   ] as const;
   for (const palette of palettes) {
     await page.emulateMedia({ colorScheme: palette.scheme });
     await expect(selected).toHaveCSS("background-color", palette.selected);
     await expect(source).toHaveCSS("color", palette.muted);
     await github.hover();
-    await expect(github).toHaveCSS("background-color", palette.hover);
+    await expect(github).toHaveCSS("background-color", palette.selected);
+    await expectContrast(selected.locator("small"));
+    await expectContrast(github.locator("small"));
     await picker.focus();
     await page.keyboard.press("Tab");
     await expect(github).toBeFocused();
@@ -118,8 +149,8 @@ test("both source editors follow the active color scheme", async ({ page }) => {
     { path: "/instances", name: "Tuple YAML", text: "- user: user:maya\n  relation: viewer\n  object: document:example" },
   ];
   const palettes = [
-    { scheme: "light", background: "rgb(255, 255, 255)", ink: "rgb(23, 32, 30)" },
-    { scheme: "dark", background: "rgb(16, 24, 21)", ink: "rgb(230, 238, 234)" },
+    { scheme: "light", background: "rgb(247, 249, 255)", ink: "rgb(36, 52, 73)" },
+    { scheme: "dark", background: "rgb(16, 23, 44)", ink: "rgb(231, 239, 248)" },
   ] as const;
 
   for (const { path, name, text } of editors) {
@@ -133,6 +164,38 @@ test("both source editors follow the active color scheme", async ({ page }) => {
       await expect(surface.locator("..")).toHaveCSS("background-color", palette.background);
       await expect(surface.locator("code").first()).toHaveCSS("color", palette.ink);
       await expect(source).toHaveCSS("caret-color", palette.ink);
+      for (const token of await surface.locator(".editor-line-number, code span").all()) await expectContrast(token);
     }
+  }
+});
+
+test("Cobalt keeps navigation, hover, focus, and validation legible in both modes", async ({ page }) => {
+  await openScreen(page, "/queries");
+  const header = page.getByRole("banner");
+  const query = header.getByRole("link", { name: "Query", exact: true });
+  const model = header.getByRole("link", { name: "Model", exact: true });
+  const store = header.getByRole("combobox", { name: "Store", exact: true });
+  const requestPane = page.locator(".wb-pane").filter({ has: page.getByRole("heading", { name: "Query request" }) });
+  const operation = requestPane.getByRole("combobox", { name: "Operation" });
+  const required = requestPane.getByRole("combobox", { name: "Object" });
+  await expect(required).toHaveAttribute("aria-invalid", "true");
+
+  for (const [scheme, chrome] of [["light", "rgb(38, 73, 187)"], ["dark", "rgb(29, 47, 107)"]] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await expect(header).toHaveCSS("background-color", chrome);
+    await expect(query).toHaveCSS("box-shadow", /0px -1px 0px 0px inset$/);
+    await expectContrast(query);
+    await model.hover();
+    await expectContrast(model);
+    await page.keyboard.press("Tab");
+    await query.focus();
+    await expect(query).toHaveCSS("outline-style", "solid");
+    await expectContrast(query, 3, "outline-color", header);
+    await expectContrast(store, 3, "border-top-color", header);
+    await expectContrast(store.locator("..").locator(".wb-required-mark"));
+    await expectContrast(operation);
+    await expectContrast(operation, 3, "border-top-color", requestPane);
+    await expectContrast(required, 3, "border-top-color", requestPane);
+    await expectContrast(required.locator("..").locator(".wb-required-mark"));
   }
 });

@@ -159,8 +159,8 @@ export function InstancesScreen({ draft, model, edit, add, notice, progress, res
       </aside>}
       <DirectTuples records={records} links={instances.get(node)} inspect={inspect} />
     </section>
-    {newInstance && <Dialog title="New instance" close={() => setNewInstance(false)}>
-      <form onSubmit={(event) => { event.preventDefault(); add(type + ":" + id); setNewInstance(false); }}>
+    {newInstance && <Dialog title="New instance" iconClose close={() => setNewInstance(false)}>
+      <form className="wb-instance-create" onSubmit={(event) => { event.preventDefault(); add(type + ":" + id); setNewInstance(false); }}>
         <Select label="Type" value={type} options={types} change={setType} />
         <label>Instance ID<input required pattern="[^\s:#]+" value={id} onChange={(event) => setId(event.target.value)} /></label>
         <button disabled={!type || !id} type="submit">Create instance</button>

@@ -181,10 +181,10 @@ function buildElements(
   });
 
   const edgeColors = {
-    computed: "#7256bd",
-    direct: "#4169e1",
-    inherited: "#0a8a61",
-    negative: "#c44343",
+    computed: "var(--purple)",
+    direct: "var(--blue)",
+    inherited: "var(--green)",
+    negative: "var(--red)",
   };
   const edges: Edge[] = graph.dependencies.map((dependency) => {
     const related = !selectedRelation || relatedDependencies.some((candidate) => candidate.id === dependency.id);
@@ -195,6 +195,7 @@ function buildElements(
     )
       ? dependency.label
       : undefined;
+    const color = related ? edgeColors[dependency.kind] : "var(--subtle)";
     return {
     animated: related && Boolean(selectedRelation) && dependency.kind === "inherited",
     className: `fga-edge ${dependency.kind}`,
@@ -203,14 +204,13 @@ function buildElements(
     label: edgeLabel,
     labelBgBorderRadius: 4,
     labelBgPadding: [5, 3],
-    labelBgStyle: { fill: "#f9fbfa", fillOpacity: 0.94 },
-    labelStyle: { fill: "#65716c", fontSize: 10, fontWeight: 650 },
-    markerEnd: { color: edgeColors[dependency.kind], height: 14, type: MarkerType.ArrowClosed, width: 14 },
+    labelBgStyle: { fill: "var(--paper)" },
+    labelStyle: { fill: "var(--muted)", fontSize: 10, fontWeight: 650 },
+    markerEnd: { color, height: 14, type: MarkerType.ArrowClosed, width: 14 },
     source: `type:${dependency.sourceType}`,
     sourceHandle: dependency.sourceRelation ? `out:${dependency.sourceRelation}` : "out:$type",
     style: {
-      opacity: related ? (selectedRelation ? 1 : 0.7) : 0.08,
-      stroke: edgeColors[dependency.kind],
+      stroke: color,
       strokeWidth: related && selectedRelation ? 2.2 : dependency.kind === "inherited" ? 1.65 : 1.25,
     },
     target: `type:${dependency.targetType}`,
@@ -366,7 +366,6 @@ export function ModelGraphCanvas({
 
   return (
     <ReactFlow<FgaTypeNode, Edge>
-      colorMode="light"
       defaultEdgeOptions={{ interactionWidth: 18 }}
       edges={elements.edges}
       elementsSelectable
@@ -389,7 +388,7 @@ export function ModelGraphCanvas({
       selectionOnDrag={false}
     >
       <FitGraph signature={signature} />
-      <Background color="#aab8b1" gap={20} size={1} />
+      <Background color="var(--line-strong)" gap={20} size={1} />
       <GraphControlDock
         allCollapsed={allCollapsed}
         focusRelated={focusRelated}
@@ -400,8 +399,8 @@ export function ModelGraphCanvas({
       />
       {graph.types.length > 3 && (
         <MiniMap
-          maskColor="rgb(245 248 246 / 72%)"
-          nodeColor="#dfe9e4"
+          maskColor="color-mix(in srgb, var(--canvas) 72%, transparent)"
+          nodeColor="var(--line-strong)"
           pannable
           position="bottom-right"
           zoomable

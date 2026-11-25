@@ -1,20 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useImperativeHandle, useMemo, useRef, type ReactNode, type Ref } from "react";
 import {
   Background, Controls, Handle, MarkerType, Position, ReactFlow, type Edge, type Node, type NodeProps, type ReactFlowInstance,
 } from "@xyflow/react";
-import { Target } from "lucide-react";
 
 import type { ReviewResource, ReviewScope } from "@/lib/workbench-access-review-contract";
 import { reviewPair } from "@/lib/workbench-access-review-contract";
 
-export type ReviewTone = "allowed" | "matches" | "muted";
+export type ReviewTone = "allowed" | "denied" | "matches" | "muted";
+export type AccessReviewGraphHandle = { recenter: () => void };
 type ReviewNode = Node<{ content: ReactNode; tone?: ReviewTone; selected: boolean }, "review">;
 
 function ReviewCard({ data }: NodeProps<ReviewNode>) {
-  return <div className="review-graph-card" data-muted={data.tone === "muted" || undefined}
+  return <div className="review-graph-card" data-muted={data.tone === "muted" || data.tone === "denied" || undefined}
     data-allowed={data.tone === "allowed" || undefined} data-matches={data.tone === "matches" || undefined}
+    data-denied={data.tone === "denied" || undefined}
     data-selected={data.selected || undefined}>
     <Handle type="target" position={Position.Top} isConnectable={false} />
     {data.content}
@@ -70,7 +71,7 @@ function positions(root: string, resources: ReviewResource[]) {
 }
 
 /** Lay out the full hierarchy independently of access decisions. */
-export function AccessReviewGraph({ scope, visible, selection, cardTones, branchTones, highlighted, render, select, viewportChanged }: {
+export function AccessReviewGraph({ scope, visible, selection, cardTones, branchTones, highlighted, render, select, viewportChanged, ref }: {
   scope: ReviewScope;
   visible: ReviewResource[];
   selection: { object: string; focusChart: boolean } | undefined;
@@ -80,9 +81,11 @@ export function AccessReviewGraph({ scope, visible, selection, cardTones, branch
   render: (resource: ReviewResource) => ReactNode;
   select: (object: string) => void;
   viewportChanged: () => void;
+  ref: Ref<AccessReviewGraphHandle>;
 }) {
   const layout = useMemo(() => positions(scope.root, visible), [scope.root, visible]);
   const flow = useRef<ReactFlowInstance<ReviewNode, Edge>>(null);
+  useImperativeHandle(ref, () => ({ recenter: () => { void flow.current?.fitView(fitOptions); } }), []);
   useEffect(() => {
     const frame = requestAnimationFrame(() => { void flow.current?.fitView(fitOptions); });
     return () => cancelAnimationFrame(frame);
@@ -114,10 +117,13 @@ export function AccessReviewGraph({ scope, visible, selection, cardTones, branch
     const onPath = group.some((edge) => highlighted.has(JSON.stringify([edge.subject, edge.relation, edge.object])));
     const primary = parents.get(child) === parent;
     const tone = branchTones.get(child);
-    const color = onPath || tone === "allowed" ? "var(--green)" : tone === "matches" ? "var(--blue)"
-      : tone === "muted" ? "var(--line-strong)" : "var(--subtle)";
+    const color = tone === "allowed" ? "var(--green)" : tone === "denied" ? "var(--red)"
+      : onPath || tone === "matches" ? "var(--blue)" : "var(--subtle)";
+    const relations = [...new Set(group.map(({ relation }) => relation))].sort().join(" · ");
+    const verdict = tone === "allowed" ? "Allowed access in branch" : tone === "denied" ? "Denied access in branch" : undefined;
     return { id, source: parent, target: child, type: "smoothstep",
-      label: [...new Set(group.map(({ relation }) => relation))].sort().join(" · "),
+      ariaLabel: [relations, parent + " to " + child, verdict].filter(Boolean).join(" · "),
+      label: relations + (tone === "allowed" ? " · ✓" : tone === "denied" ? " · ×" : ""),
       labelStyle: { fill: "var(--ink)", fontSize: 12 },
       labelBgStyle: { fill: "var(--paper)" },
       markerEnd: { type: MarkerType.ArrowClosed, color }, style: {
@@ -126,27 +132,17 @@ export function AccessReviewGraph({ scope, visible, selection, cardTones, branch
     };
   });
 
-  return <>
-    <header className="wb-pane-heading">
-      <div className="wb-heading-label"><h2>Access chart</h2>
-        <button type="button" className="wb-icon-button review-recenter" aria-label="Recenter chart" title="Recenter chart"
-          onClick={() => { void flow.current?.fitView(fitOptions); }}>
-          <Target size={15} aria-hidden="true" />
-        </button>
-      </div>
-    </header>
-    <div className="review-graph">
-      <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes}
-        onInit={(instance) => { flow.current = instance; }} fitView fitViewOptions={fitOptions}
-        onNodeClick={(event, node) => {
-          if (event.target instanceof Element && !event.target.closest("button")) select(node.id);
-        }}
-        onMove={viewportChanged}
-        nodesConnectable={false} nodesDraggable={false} nodesFocusable={false} elementsSelectable={false} minZoom={0.02} maxZoom={1.9}
-        proOptions={{ hideAttribution: false }}>
-        <Background color="var(--line-strong)" gap={20} />
-        <Controls showInteractive={false} fitViewOptions={fitOptions} />
-      </ReactFlow>
-    </div>
-  </>;
+  return <div className="review-graph">
+    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes}
+      onInit={(instance) => { flow.current = instance; }} fitView fitViewOptions={fitOptions}
+      onNodeClick={(event, node) => {
+        if (event.target instanceof Element && !event.target.closest("button")) select(node.id);
+      }}
+      onMove={viewportChanged}
+      nodesConnectable={false} nodesDraggable={false} nodesFocusable={false} elementsSelectable={false} minZoom={0.02} maxZoom={1.9}
+      proOptions={{ hideAttribution: false }}>
+      <Background color="var(--line-strong)" gap={20} />
+      <Controls showInteractive={false} fitViewOptions={fitOptions} />
+    </ReactFlow>
+  </div>;
 }

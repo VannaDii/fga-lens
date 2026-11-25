@@ -103,7 +103,7 @@ test("settings combines connection status and appearance controls, and keeps the
   await expect(button(theme, "System")).toHaveAttribute("aria-pressed", "true");
   await button(theme, "Dark").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(page.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#101a16");
+  await expect(page.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#1d2f6b");
   const close = button(dialog, "Close");
   await expect(close.locator("svg")).toBeVisible();
   await close.click();
@@ -112,12 +112,12 @@ test("settings combines connection status and appearance controls, and keeps the
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await settings.click();
   await button(theme, "Light").click();
-  await expect(page.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#192822");
+  await expect(page.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#2649bb");
   await button(theme, "System").click();
   await page.emulateMedia({ colorScheme: "dark" });
-  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(18, 27, 23)");
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(22, 30, 54)");
   await page.emulateMedia({ colorScheme: "light" });
-  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(245, 248, 246)");
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(241, 244, 255)");
 });
 
 test("the 320px navigation and pane controls fit and both editors remain reachable", async ({ page, request }) => {

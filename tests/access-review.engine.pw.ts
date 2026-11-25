@@ -12,6 +12,7 @@ import {
   oldRevisionLink, remote, reviewModel, shared, scopeObjects, scopeTuples, storedMarker, tide, unrelated,
 } from "./access-review-fixture";
 import { armTransport, capturedRequests, clearTraffic, postToEngine } from "./workbench-fixtures";
+import { expectContrast } from "./theme-contrast";
 
 /** Install the obsolete link on its accepting revision, then select the current immutable model. */
 async function installReview(request: APIRequestContext) {
@@ -32,7 +33,7 @@ async function expectKnownDecisions(request: APIRequestContext, target: FixtureT
 async function openReview(page: Page) {
   const entry = await page.goto("/explore");
   expect(entry?.status(), "GET /explore should serve Explore").toBe(200);
-  await expect(page.getByRole("heading", { name: "Explore", exact: true })).toBeVisible();
+  await expect(startAt(page)).toBeVisible();
 }
 
 test("Explore uses its named route and appears last in navigation", async ({ page }) => {
@@ -48,9 +49,12 @@ test("Explore uses its named route and appears last in navigation", async ({ pag
   await expect(page.getByRole("combobox", { name: "Model revision", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toHaveAccessibleDescription(/^(Connected|Offline)$/);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-  await expect(startAt(page)).toBeVisible();
-  await expect(viewAs(page)).toBeVisible();
-  await expect(refresh(page)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Explore", exact: true })).toHaveCount(0);
+  const chartHeader = page.getByRole("region", { name: "Access chart", exact: true }).locator("header");
+  await expect(chartHeader.getByRole("heading", { name: "Access chart", level: 1 })).toBeVisible();
+  await expect(chartHeader.getByRole("combobox", { name: "Start at", exact: true })).toBeVisible();
+  await expect(chartHeader.getByRole("combobox", { name: "View as", exact: true })).toBeVisible();
+  await expect(chartHeader.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
 });
 
 test("access catalog admits the installed target and returns stored organization and person candidates", async ({ request }) => {
@@ -78,6 +82,12 @@ test("stock Check and Instances controls agree on the same stored Access Review 
   const focus = page.getByRole("combobox", { name: "Focus instance", exact: true });
   await focus.selectOption(campaign);
   await expect(focus).toHaveValue(campaign);
+  const role = page.locator(".wb-instance-role").filter({ has: page.getByText("Editor", { exact: true }) }).first();
+  for (const [scheme, fill] of [["light", "rgb(226, 245, 250)"], ["dark", "rgb(32, 62, 80)"]] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await expect(role).toHaveCSS("background-color", fill);
+    await expectContrast(role.getByText("Editor", { exact: true }));
+  }
 });
 
 /** Install another immutable revision without changing fixture tuples. */
@@ -102,6 +112,9 @@ const startAt = (page: Page) => page.getByRole("combobox", { name: "Start at", e
 const viewAs = (page: Page) => page.getByRole("combobox", { name: "View as", exact: true });
 const outline = (page: Page) => page.getByRole("region", { name: "Access outline", exact: true });
 const refresh = (page: Page) => page.getByRole("button", { name: "Refresh", exact: true });
+const reviewInfo = (page: Page) => page.getByRole("region", { name: "Review information", exact: true });
+const reviewValue = (info: Locator, label: string) => info.locator("dt").filter({ hasText: new RegExp("^" + label + "$") })
+  .locator("xpath=following-sibling::dd");
 const launch = "Launch";
 
 /** Find the specifically labelled outline entry independently of the graph's drawing library. */
@@ -221,6 +234,24 @@ test("AR01 rolls up a shared descendant for both parents without duplicating sco
     const islandsCard = chart.locator(".review-graph-card").filter({ has: page.getByText("Islands", { exact: true }) });
     await expect(islandsCard).toHaveAttribute("data-muted", "true");
     await expect(coastalEntry).toHaveAttribute("data-muted", "true");
+    const edge = (child: string) => chart.locator(".react-flow__edge")
+      .and(chart.getByTestId("rf__edge-" + JSON.stringify([tide, child]))).locator(".react-flow__edge-path");
+    const allowed = resource(page, launch).getByRole("button", { name: "Edit · Allowed", exact: true });
+    const denied = islandsEntry.getByRole("button", { name: "View · Denied", exact: true });
+    for (const [scheme, green, red] of [
+      ["light", "rgb(9, 107, 71)", "rgb(161, 46, 52)"],
+      ["dark", "rgb(153, 228, 186)", "rgb(255, 180, 178)"],
+    ] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await expect(allowed).toHaveCSS("color", green);
+      await expect(denied).toHaveCSS("color", red);
+      await expect(edge(coastal)).toHaveCSS("stroke", green);
+      await expect(edge(islands)).toHaveCSS("stroke", red);
+      await expectContrast(allowed);
+      await expectContrast(denied);
+      await expectContrast(edge(coastal), 3, "stroke", chart.locator(".review-graph"));
+      await expectContrast(edge(islands), 3, "stroke", chart.locator(".review-graph"));
+    }
     const collapse = coastalEntry.getByRole("button", { name: "Collapse Coastal", exact: true });
     const branchLayout = await chartLayout(page);
 
@@ -663,7 +694,8 @@ test("AR04 shows the full hierarchy and relationship results on the chart withou
     const card = await entry.boundingBox();
     expect(row!.y + row!.height).toBeLessThan(card!.y + card!.height);
     await expect(page.getByText("Scope relationships", { exact: true })).toHaveCount(0);
-    await expect(chart.locator(".react-flow__edge-text").filter({ hasText: /^include$/ })).toBeVisible();
+    const deniedLink = chart.getByRole("group", { name: /^include · .* · Denied access in branch$/ });
+    await expect(deniedLink.locator(".react-flow__edge-text")).toHaveText("include · ×");
     await expect(nodes.filter({ hasText: "Tide" }).getByRole("button", { name: "Relationship include · Does not match", exact: true })).toBeVisible();
 
     const viewport = chart.locator(".react-flow__viewport");
@@ -683,6 +715,11 @@ test("Explore chart and outline use the available height when the window resizes
   await expect(panels).toHaveCount(2);
   for (const height of [1000, 700]) {
     await page.setViewportSize({ width: 1440, height });
+    const menuBottom = await page.locator(".wb-header").evaluate((header) => header.getBoundingClientRect().bottom);
+    await expect.poll(() => panels.evaluateAll((panels, menuBottom) => Math.max(...panels.map((panel) => {
+      const gutter = parseFloat(getComputedStyle(panel.closest("main")!).paddingTop);
+      return Math.abs(panel.getBoundingClientRect().top - menuBottom - gutter);
+    })), menuBottom)).toBeLessThan(2);
     await expect.poll(() => panels.evaluateAll((panels) => Math.max(...panels.map((panel) => {
       const gutter = parseFloat(getComputedStyle(panel.closest("main")!).paddingBottom);
       return Math.abs(window.innerHeight - panel.getBoundingClientRect().bottom - gutter);
@@ -751,16 +788,16 @@ test("Access Review opens Why next to the card and puts review metadata behind a
   const target = await installReview(request);
   await selectTarget(page, target);
   await selectReview(page, editor);
-  const info = page.getByRole("region", { name: "Review information", exact: true });
-  const infoButton = page.getByRole("button", { name: "Review information", exact: true });
-  await expect(page.getByText(/Hierarchy read/).filter({ visible: true })).toHaveCount(0);
+  const chart = page.getByRole("region", { name: "Access chart", exact: true });
+  const info = reviewInfo(page);
+  const infoButton = chart.locator("header").getByRole("button", { name: "Review information", exact: true });
+  await expect(info).toBeHidden();
   await infoButton.click();
-  await expect(info).toContainText("Hierarchy read");
-  await expect(info.getByText(/0 unfinished/)).toBeVisible();
+  await expect(info).not.toContainText(/Hierarchy read|Decisions observed/);
+  await expect(reviewValue(info, "Unfinished")).toHaveText("0");
   await page.keyboard.press("Escape");
   await expect(info).toBeHidden();
 
-  const chart = page.getByRole("region", { name: "Access chart", exact: true });
   const node = chart.locator(`[data-id="${campaign}"]`);
   await resource(page, launch).getByRole("button", { name: "Focus Launch on chart", exact: true }).click();
   const trigger = node.getByRole("button", { name: "Why", exact: true });
@@ -780,12 +817,56 @@ test("Access Review opens Why next to the card and puts review metadata behind a
   const panelBox = await panel.boundingBox();
   expect(anchorBox && panelBox && (panelBox.x >= anchorBox.x + anchorBox.width
     || panelBox.x + panelBox.width <= anchorBox.x)).toBe(true);
-  await page.getByRole("heading", { name: "Explore", exact: true }).click();
+  await chart.getByRole("heading", { name: "Access chart", exact: true }).click();
   await page.keyboard.press("Escape");
   await expect(panel).toBeVisible();
   await panel.getByRole("button", { name: "Close Why", exact: true }).click();
   await expect(panel).toHaveCount(0);
   await expect(trigger).toBeFocused();
+});
+
+test("Explore shows first results before timing later check batches", async ({ page, request }) => {
+  const target = await installReview(request);
+  await selectTarget(page, target);
+  await startAt(page).selectOption(tide);
+  const initial = holdAction(page, "access-review-check", "after checkpoint", ({ checks }) =>
+    (checks as { id: string }[])[0].id === "check-0");
+  const later = holdAction(page, "access-review-check", "after checkpoint", ({ checks }) =>
+    (checks as { id: string }[])[0].id === "check-25");
+  await Promise.all([initial.ready, later.ready]);
+
+  try {
+    await viewAs(page).selectOption(editor);
+    await Promise.all([initial.arrived, later.arrived]);
+    await page.getByRole("button", { name: "Review information", exact: true }).click();
+    const info = reviewInfo(page);
+    const value = (label: string) => reviewValue(info, label);
+    const duration = /^\d+(?:\.\d+)? (?:ms|s)$/;
+    await expect(value("Start at")).toHaveText("Tide");
+    await expect(value("View as")).toHaveText("Sequoia editor");
+    await expect(value("First results")).toHaveText("Pending");
+    const counts = info.getByRole("status");
+    await expect(reviewValue(counts, "Checks processed")).toHaveText("0 of 34");
+    await expect(reviewValue(counts, "Unavailable")).toHaveText("0");
+    await expect(reviewValue(counts, "Unfinished")).toHaveText("34");
+    initial.release();
+    await expect(value("First results")).toHaveText(duration);
+    const firstTime = await value("First results").innerText();
+    await expect(value("Later batches")).toHaveText("Pending");
+    await expect(value("Total check time")).toHaveText("In progress");
+    await expect(reviewValue(counts, "Checks processed")).toHaveText("25 of 34");
+    await expect(reviewValue(counts, "Unfinished")).toHaveText("9");
+    later.release();
+    await expect(value("Later batches")).toContainText(/\d+(?:\.\d+)? (?:ms|s) average/);
+    await expect(value("Later batches")).toContainText("1 batch");
+    await expect(value("First results")).toHaveText(firstTime);
+    await expect(value("Total check time")).toHaveText(duration);
+    await expect(reviewValue(counts, "Checks processed")).toHaveText("34 of 34");
+    await expect(reviewValue(counts, "Unfinished")).toHaveText("0");
+  } finally {
+    initial.release();
+    later.release();
+  }
 });
 
 test("Explore shows unavailable results for an object beyond the check service limit", async ({ page, request }) => {
@@ -818,7 +899,7 @@ test("AR05 rejects a later real Read page and marks any retained identical revie
     const entry = resource(page, launch);
     await expectVerdict(entry, "Edit", "Allowed");
     await page.getByRole("button", { name: "Review information", exact: true }).click();
-    await expect(page.getByRole("status").filter({ hasText: / · 0 unfinished$/ })).toBeVisible();
+    await expect(reviewValue(reviewInfo(page), "Unfinished")).toHaveText("0");
     await page.keyboard.press("Escape");
     await clearTraffic(request);
 
@@ -863,7 +944,7 @@ test("AR05 cancels two real in-flight batches and leaves unsent checks incomplet
 
       await page.getByRole("button", { name: "Review information", exact: true }).click();
       await page.getByRole("button", { name: /^Cancel\b.*(?:review|checks)?/i }).click();
-      await expect(page.getByRole("status").filter({ hasText: /cancel|unfinished|incomplete/i }).first()).toBeVisible();
+      await expect(reviewInfo(page).getByRole("status")).toContainText("Review cancelled");
       for (const gate of gates) await gateState(request, gate);
       await expect.poll(() => gateState(request)).toEqual([]);
       await expectVerdict(resource(page, "Tide"), "View", "Not yet checked");

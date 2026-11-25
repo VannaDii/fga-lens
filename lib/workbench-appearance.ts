@@ -1,2 +1,2 @@
 /** Match the browser tint to the shared navigation surface. */
-export const chromeTint = { light: "#192822", dark: "#101a16" } as const;
+export const chromeTint = { light: "#2649bb", dark: "#1d2f6b" } as const;

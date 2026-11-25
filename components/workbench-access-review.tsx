@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { TypeOf } from "io-ts";
-import { ChevronDown, ChevronRight, CircleQuestionMark, Eye, Info, RefreshCw, X } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleQuestionMark, Eye, Info, RefreshCw, Target as TargetIcon, X } from "lucide-react";
 
 import {
   reviewCatalog, reviewPair, reviewPreferences, reviewScope,
@@ -11,7 +11,7 @@ import {
 import { decode, evidenceResult, tupleKey, type ConditionContext, type Target } from "@/lib/workbench-contract";
 import { contextValue, invalidContext } from "@/lib/workbench-models";
 
-import { AccessReviewGraph, type ReviewTone } from "./workbench-access-review-graph";
+import { AccessReviewGraph, type AccessReviewGraphHandle, type ReviewTone } from "./workbench-access-review-graph";
 import { useReviewEvaluation, type Row } from "./workbench-access-review-state";
 import { Disclosure, failureText, invoke } from "./workbench-ui";
 
@@ -32,6 +32,7 @@ const objectLabel = (object: string) => words(object.slice(object.indexOf(":") +
 const isAction = (relation: string) => relation.startsWith("can_");
 const message = (error: unknown) => error instanceof Error ? error.message : "server error";
 const time = (stamp: number) => new Date(stamp).toLocaleTimeString();
+const duration = (ms: number) => ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : ms.toFixed(1) + " ms";
 
 function restore(saved?: string): ReviewPreferences {
   try {
@@ -170,7 +171,7 @@ function summarize(branch: ReviewResource[], rows?: Map<string, Row>): ReviewTon
       }
     }
   }
-  if (hasActions) return pendingAction ? undefined : "muted";
+  if (hasActions) return pendingAction ? undefined : "denied";
   if (matches) return "matches";
   if (hasRelationships && !pendingRelationship) return "muted";
 }
@@ -279,6 +280,7 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
   const evidenceTrigger = useRef<HTMLButtonElement>(null);
   const whyPanel = useRef<HTMLElement>(null);
   const chartPanel = useRef<HTMLElement>(null);
+  const chartGraph = useRef<AccessReviewGraphHandle>(null);
   const outlineList = useRef<HTMLDivElement>(null);
   const whyFrame = useRef<number>(null);
   const { catalog, scope, current, issue, removed, loading } = useReviewDiscovery(target, epoch, structureSelection, preferences, save, latest);
@@ -402,9 +404,11 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
     const row = rows?.get(reviewPair(resource.object, relation));
     const status = decisionLabel(row, action);
     const checked = row && "allowed" in row;
+    const tone = checked && action ? (row.allowed ? "allowed" : "denied")
+      : checked && row.allowed ? "matches" : undefined;
     return <button type="button" key={relation} className="review-decision nodrag"
       aria-label={action ? undefined : "Relationship " + relation + " · " + status}
-      data-state={checked ? (row.allowed ? (action ? "allowed" : "matches") : "denied") : undefined}
+      data-state={tone}
       title={[relation, unavailableDetails(row)].filter(Boolean).join(" · ")} disabled={!checked}
       onClick={(event) => {
         if (checked) explain(resource, relation, row.allowed, event.currentTarget);
@@ -473,9 +477,10 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
   function outlineBranch(resource: ReviewResource) {
     const descendants = children.get(resource.object);
     const tone = cardTones.get(resource.object);
-    return <li key={resource.object}>
+    return <li key={resource.object} data-branch-tone={branchTones.get(resource.object)}>
       <article className="review-outline-card" data-review-object={resource.object}
-        data-muted={tone === "muted" || undefined} data-allowed={tone === "allowed" || undefined}
+        data-muted={tone === "muted" || tone === "denied" || undefined} data-allowed={tone === "allowed" || undefined}
+        data-denied={tone === "denied" || undefined}
         data-matches={tone === "matches" || undefined} data-selected={selection?.object === resource.object || undefined}>
         {renderResource(resource, true)}
       </article>
@@ -484,88 +489,119 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
     </li>;
   }
 
+  const processed = run?.rows.size ?? 0;
   const unavailable = [...(run?.rows.values() ?? [])].filter((row) => !("allowed" in row) && !("missing" in row && row.missing?.length)).length;
+  const showChecks = Boolean(subject && !invalid && total > 0);
+  const checking = current && (!run || run.phase === "running");
+  const { firstResults, laterBatches, elapsed } = run?.timing ?? {};
   const checkRecovery = run?.diagnostic?.startsWith("invalid input")
     ? "Verify the selected revision and that the endpoint accepts up to 25 checks per request."
     : run?.diagnostic?.startsWith("missing target") ? "Select another installed revision." : "Refresh to try again.";
 
   return <main className="review-page">
-    <section className="wb-pane review-controls">
-      <header className="wb-pane-heading"><div className="wb-heading-label">
-        <h1>Explore</h1>
-        {scope && <>
-          <button type="button" className="wb-icon-button wb-icon-button-quiet" aria-label="Review information"
-            popoverTarget={infoId}><Info size={17} aria-hidden /></button>
-          <div id={infoId} popover="auto" className="wb-sync-popover" role="region" aria-label="Review information">
-            <strong>Review information</strong>
-            <p>{objectLabel(scope.root)}{subject && " · View as " + subject}</p>
-            <p>Hierarchy read {time(scope.observedAt)}</p>
-            {run?.observedAt && <p>Decisions observed {time(run.observedAt)}</p>}
-            {subject && !invalid && total > 0 && <>
-              <p role="status">{run?.phase === "cancelled" ? "Review cancelled · " : run?.phase === "timeout" ? "Review timed out · " : ""}
-                {run?.rows.size ?? 0} of {total} checks processed · {unavailable} unavailable · {total - (run?.rows.size ?? 0)} unfinished</p>
-              {run?.phase === "running" && current && <button type="button" onClick={cancel}>Cancel review</button>}
+    <div className="review-layout">
+      <section className="wb-pane review-chart" aria-label="Access chart" ref={chartPanel}>
+        <header className="wb-pane-heading">
+          <div className="wb-heading-label">
+            <h1>Access chart</h1>
+            {scope && <>
+              <button type="button" className="wb-icon-button wb-icon-button-quiet" aria-label="Recenter chart" title="Recenter chart"
+                onClick={() => chartGraph.current?.recenter()}><TargetIcon size={15} aria-hidden /></button>
+              <button type="button" className="wb-icon-button wb-icon-button-quiet" aria-label="Review information"
+                popoverTarget={infoId}><Info size={17} aria-hidden /></button>
+              <div id={infoId} popover="auto" className="wb-sync-popover" role="region" aria-label="Review information">
+                <strong>Review information</strong>
+                <dl className="review-info">
+                  <div><dt>Start at</dt><dd title={scope.root}>{objectLabel(scope.root)}</dd></div>
+                  <div><dt>View as</dt><dd title={subject || undefined}>{subject ? objectLabel(subject) : "—"}</dd></div>
+                  {showChecks && <>
+                    <div className="review-info-divider">
+                      <dt title="Time until the first batch of checks returns">First results</dt>
+                      <dd>{firstResults !== undefined ? duration(firstResults) : checking ? "Pending" : "—"}</dd>
+                    </div>
+                    <div>
+                      <dt title="Round-trip times for batches returned after the first">Later batches</dt>
+                      <dd>{laterBatches ? <>
+                        {duration(laterBatches.sum / laterBatches.count)} average
+                        <small>{laterBatches.count === 1 ? "1 batch" :
+                          `${laterBatches.count} batches · ${duration(laterBatches.min)}–${duration(laterBatches.max)}`}</small>
+                      </> : checking ? "Pending" : "None"}</dd>
+                    </div>
+                    <div><dt>Total check time</dt><dd>{elapsed !== undefined ? duration(elapsed) : checking ? "In progress" : "—"}</dd></div>
+                  </>}
+                </dl>
+                {showChecks && <>
+                  <div role="status">
+                    <dl className="review-info review-info-divider">
+                      <div><dt>Checks processed</dt><dd>{processed} of {total}</dd></div>
+                      <div><dt>Unavailable</dt><dd>{unavailable}</dd></div>
+                      <div><dt>Unfinished</dt><dd>{total - processed}</dd></div>
+                    </dl>
+                    {run?.phase === "cancelled" && <p>Review cancelled</p>}
+                    {run?.phase === "timeout" && <p>Review timed out</p>}
+                  </div>
+                  {run?.phase === "running" && current && <button type="button" onClick={cancel}>Cancel review</button>}
+                </>}
+              </div>
             </>}
           </div>
-        </>}
-      </div></header>
-      <div className="wb-actions wb-form-actions">
-        <ReviewPicker label="Start at" value={preferences.root ?? ""} objects={available} preferredType="organization"
-          change={(root) => { setCollapsed(new Set()); setSelection(undefined); save({ root }); }} />
-        <ReviewPicker label="View as" value={subject} objects={available} preferredType="user"
-          change={(subject) => save({ subject })} />
-        <button type="button" className="wb-icon-button wb-icon-button-quiet" aria-label="Refresh" title="Refresh review"
-          disabled={!target.store || !target.revision} onClick={() => {
-          setEpoch((previous) => previous + 1);
-        }}><RefreshCw size={16} aria-hidden="true" /></button>
-      </div>
-      {declared.size > 0 && <Disclosure title="Condition context">
-        {[...declared].map(([name, types]) => <div key={name}>
-          <label>{name}
-            <input value={inputs[name] ?? ""} autoComplete="off" aria-invalid={invalid === name}
-              placeholder={[...new Set(types.map(({ type_name }) => type_name.replace(/^TYPE_NAME_/, "").toLowerCase()))].join(" or ")}
-              onChange={(event) => {
-                setInputs({ ...inputs, [name]: event.target.value });
+          <div className="review-chart-selectors">
+            <ReviewPicker label="Start at" value={preferences.root ?? ""} objects={available} preferredType="organization"
+              change={(root) => { setCollapsed(new Set()); setSelection(undefined); save({ root }); }} />
+            <ReviewPicker label="View as" value={subject} objects={available} preferredType="user"
+              change={(subject) => save({ subject })} />
+            <button type="button" className="wb-icon-button wb-icon-button-quiet" aria-label="Refresh" title="Refresh review"
+              disabled={!target.store || !target.revision} onClick={() => {
+              setEpoch((previous) => previous + 1);
+            }}><RefreshCw size={16} aria-hidden="true" /></button>
+          </div>
+        </header>
+        {declared.size > 0 && <Disclosure title="Condition context">
+          {[...declared].map(([name, types]) => <div key={name}>
+            <label>{name}
+              <input value={inputs[name] ?? ""} autoComplete="off" aria-invalid={invalid === name}
+                placeholder={[...new Set(types.map(({ type_name }) => type_name.replace(/^TYPE_NAME_/, "").toLowerCase()))].join(" or ")}
+                onChange={(event) => {
+                  setInputs({ ...inputs, [name]: event.target.value });
+                  setCheckSelection((previous) => previous + 1);
+                }} />
+            </label>
+            {types.some(({ type_name }) => type_name === "TYPE_NAME_STRING") && !inputs[name] &&
+              <label><input type="checkbox" checked={emptyStrings.has(name)} onChange={(event) => {
+                const next = new Set(emptyStrings);
+                if (event.target.checked) next.add(name);
+                else next.delete(name);
+                setEmptyStrings(next);
                 setCheckSelection((previous) => previous + 1);
-              }} />
-          </label>
-          {types.some(({ type_name }) => type_name === "TYPE_NAME_STRING") && !inputs[name] &&
-            <label><input type="checkbox" checked={emptyStrings.has(name)} onChange={(event) => {
-              const next = new Set(emptyStrings);
-              if (event.target.checked) next.add(name);
-              else next.delete(name);
-              setEmptyStrings(next);
-              setCheckSelection((previous) => previous + 1);
-            }} />Send an empty string for {name}</label>}
-        </div>)}
-      </Disclosure>}
-      {invalid && <p role="alert">Invalid condition value · {invalid}. Use the declared type shown in the field.</p>}
-      {catalog && !available.length && <p>No published instances in this store.</p>}
-      {catalog && !loading && !issue && !preferences.root && available.length > 0 &&
-        <p>Select a starting instance to review.</p>}
-      {scope && !subject && <p>Select a person to evaluate access.</p>}
-      {catalog && !catalog.links.length && <p>No scope relationships defined</p>}
-      {scope?.resources.length === 1 && <p>No linked resources</p>}
-      {removed && <p role="status">{removed} is no longer in the published store. Select another instance or refresh.</p>}
-      {issue && <p role="alert">{issue}{scope && " · Stale scope from " + time(scope.observedAt)}
-        {run?.observedAt && " · Decisions from " + time(run.observedAt)}
-        {issue.includes("· missing target") && " · Select another installed revision."}</p>}
-      {loading && <p role="status">Reading published relationships…</p>}
-      {(!target.store || !target.revision) && <p>Select a store and an installed model revision.</p>}
-      {run?.diagnostic && <p role="alert">Checks unavailable · {run.diagnostic} · {checkRecovery}</p>}
-    </section>
-    {scope && <div className="review-layout">
-      <section className="wb-pane review-chart" aria-label="Access chart" ref={chartPanel}>
-        <AccessReviewGraph scope={scope} visible={visible} selection={selection} cardTones={cardTones} branchTones={branchTones}
-          highlighted={highlighted} render={(resource) => renderResource(resource, false)} select={selectResource}
-          viewportChanged={viewportChanged} />
-        {scope.edges.some(({ subject, object, relation }) => highlighted.has(tupleKey({ user: subject, object, relation }))) &&
-          <p className="review-legend">Highlighted links show relationships observed after the check.</p>}
+              }} />Send an empty string for {name}</label>}
+          </div>)}
+        </Disclosure>}
+        {invalid && <p role="alert">Invalid condition value · {invalid}. Use the declared type shown in the field.</p>}
+        {catalog && !available.length && <p>No published instances in this store.</p>}
+        {catalog && !loading && !issue && !preferences.root && available.length > 0 &&
+          <p>Select a starting instance to review.</p>}
+        {scope && !subject && <p>Select a person to evaluate access.</p>}
+        {catalog && !catalog.links.length && <p>No scope relationships defined</p>}
+        {scope?.resources.length === 1 && <p>No linked resources</p>}
+        {removed && <p role="status">{removed} is no longer in the published store. Select another instance or refresh.</p>}
+        {issue && <p role="alert">{issue}{scope && " · Stale scope from " + time(scope.observedAt)}
+          {run?.observedAt && " · Decisions from " + time(run.observedAt)}
+          {issue.includes("· missing target") && " · Select another installed revision."}</p>}
+        {loading && <p role="status">Reading published relationships…</p>}
+        {(!target.store || !target.revision) && <p>Select a store and an installed model revision.</p>}
+        {run?.diagnostic && <p role="alert">Checks unavailable · {run.diagnostic} · {checkRecovery}</p>}
+        {scope && <>
+          <AccessReviewGraph scope={scope} visible={visible} selection={selection} cardTones={cardTones} branchTones={branchTones}
+            highlighted={highlighted} render={(resource) => renderResource(resource, false)} select={selectResource}
+            viewportChanged={viewportChanged} ref={chartGraph} />
+          {scope.edges.some(({ subject, object, relation }) => highlighted.has(tupleKey({ user: subject, object, relation }))) &&
+            <p className="review-legend">Highlighted links show relationships observed after the check.</p>}
+        </>}
       </section>
-      <section className="wb-pane review-outline" aria-label="Access outline"><header className="wb-pane-heading"><h2>Access outline</h2></header>
+      {scope && <section className="wb-pane review-outline" aria-label="Access outline"><header className="wb-pane-heading"><h2>Access outline</h2></header>
         <div className="review-outline-list" ref={outlineList}><ul>{(children.get(null) ?? []).map(outlineBranch)}</ul></div>
-      </section>
-    </div>}
+      </section>}
+    </div>
     {inspection && <Why current={inspection} previous={!activeWhy} close={closeWhy} panel={whyPanel} />}
   </main>;
 }

@@ -10,12 +10,14 @@ import { canonical, type ConditionContext, type Target } from "@/lib/workbench-c
 import { invoke } from "./workbench-ui";
 
 type Row = ReviewOutcome | { unavailable: true; reason?: "object-too-long" };
+type BatchTiming = { count: number; sum: number; min: number; max: number };
 type Run = {
   key: string;
   rows: Map<string, Row>;
   phase: "running" | "complete" | "cancelled" | "timeout" | "unavailable";
   observedAt?: number;
   diagnostic?: string;
+  timing: { firstResults?: number; laterBatches?: BatchTiming; elapsed?: number };
 };
 
 function casesFor(scope?: ReviewScope) {
@@ -46,12 +48,17 @@ export function useReviewEvaluation(
       if (reviewCheckObject.is(entry.object)) jobs.add({ ...entry, id: "check-" + index });
       else rows.set(reviewPair(entry.object, entry.relation), { unavailable: true, reason: "object-too-long" });
     });
+    const hasBatches = jobs.size > 0;
+    const started = performance.now();
+    let firstResults: number | undefined;
+    let laterBatches: BatchTiming | undefined;
     let diagnostic: string | undefined;
     let observedAt: number | undefined;
     let sharedFailure = false;
 
     function publish(phase: Run["phase"]) {
-      setValue({ key, rows: new Map(rows), phase, diagnostic, observedAt });
+      const elapsed = hasBatches && phase !== "running" ? performance.now() - started : undefined;
+      setValue({ key, rows: new Map(rows), phase, diagnostic, observedAt, timing: { firstResults, laterBatches, elapsed } });
     }
 
     function finish(phase: "cancelled" | "timeout" | "unavailable") {
@@ -64,11 +71,21 @@ export function useReviewEvaluation(
       while (jobs.size && !controller.signal.aborted && !sharedFailure) {
         const batch = [...jobs].slice(0, 25);
         for (const entry of batch) jobs.delete(entry);
+        const sent = performance.now();
         try {
           const reply = await invoke(reviewChecks, {
             action: "access-review-check", target: { store, revision }, subject, context, checks: batch,
           }, controller.signal);
           if (controller.signal.aborted) return;
+          const received = performance.now();
+          const elapsed = received - sent;
+          if (firstResults === undefined) firstResults = received - started;
+          else laterBatches = laterBatches ? {
+            count: laterBatches.count + 1,
+            sum: laterBatches.sum + elapsed,
+            min: Math.min(laterBatches.min, elapsed),
+            max: Math.max(laterBatches.max, elapsed),
+          } : { count: 1, sum: elapsed, min: elapsed, max: elapsed };
           observedAt = Math.max(observedAt ?? 0, reply.observedAt);
           const results = new Map(reply.results.map((row) => [row.id, row]));
           for (const item of batch) rows.set(reviewPair(item.object, item.relation),

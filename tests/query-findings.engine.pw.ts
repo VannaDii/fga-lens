@@ -8,6 +8,7 @@ import {
 import {
   armTransport, capturedRequests, clearTraffic, installFixture, memberThroughParent, postToEngine, storedTuples,
 } from "./workbench-fixtures";
+import { expectContrast } from "./theme-contrast";
 import type { Tuple } from "@/lib/workbench-contract";
 
 const syntheticContext = 'value:synthetic_literal';
@@ -125,6 +126,16 @@ test("F07 result identifies the target and discloses the exact timed request and
   const responseCode = responseHeader.locator("..").locator("pre");
   await expect(responseCode.locator(".syntax-literal")).toHaveText("true");
   await expect(responseCode).toHaveCSS("border-radius", "8px");
+
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme });
+    await requestHeader.hover();
+    await expectContrast(requestHeader.getByText("POST", { exact: true }));
+    await expectContrast(requestHeader.locator(".wb-disclosure-meta"));
+    await expectContrast(resultHeading(page).getByText("Allowed", { exact: true }));
+    for (const token of await requestCode.locator("span").all()) await expectContrast(token);
+    await expectContrast(responseCode.locator(".syntax-literal"));
+  }
 });
 
 test("F08 a confirmed conditioned direct branch in a union yields supporting evidence", async ({ page, request }) => {
