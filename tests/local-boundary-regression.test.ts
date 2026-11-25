@@ -69,6 +69,14 @@ async function unicodeWorkspace() {
   } } } satisfies Workspace;
 }
 
+test("restores Explore from a workspace saved on the previous route", async () => {
+  const state = await unicodeWorkspace();
+  await writeFile(join(directory, "workspace.json"), JSON.stringify({ ...state, route: "access-review" }));
+
+  const view: WorkspaceView = await (await workspaceRequest()).json();
+  expect(view).toMatchObject({ recovery: false, state: { ...state, route: "explore" } });
+});
+
 /** Use an ordinary same-origin Save after the workspace is loaded. */
 function saveWorkspace(state: Workspace) {
   return postWorkspace(new Request(local + "/api/workbench", {

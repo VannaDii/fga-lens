@@ -2,13 +2,13 @@ import * as t from "io-ts";
 
 import { reviewCatalogCommand, reviewCheckCommand, reviewScopeCommand } from "@/lib/workbench-access-review-contract";
 import { readReviewCatalog, readReviewScope } from "@/lib/workbench-access-review-scope";
-import { decode, engineId, outcome, query, target, workspace, workspaceRevision } from "@/lib/workbench-contract";
+import { decode, engineId, outcome, query, storeName, target, workspace, workspaceRevision } from "@/lib/workbench-contract";
 import { explain } from "@/lib/workbench-evidence";
 import { diagnose, OperationFailure, TuplePlanRejection } from "@/lib/workbench-errors";
 import { cancelJob, jobProgress, runJob } from "@/lib/workbench-jobs";
 import { publishSavedModel, publishTuples, resolveTupleConflict, suggestModel } from "@/lib/workbench-publish";
 import { installFixture, runBatch } from "@/lib/workbench-regression";
-import { createStore, models, readTuples, runQuery, runReviewChecks, stores } from "@/lib/workbench-server";
+import { createStore, deleteStore, models, readModel, readTuples, runQuery, runReviewChecks, stores } from "@/lib/workbench-server";
 import { captureWorkspace, checkpoint, downloadRecovery, readWorkspace, saveWorkspace } from "@/lib/workbench-workspace";
 
 /** App commands decode at the server boundary before any workspace or engine access. */
@@ -16,8 +16,10 @@ const revision = workspaceRevision;
 const command = t.union([
   t.type({ action: t.literal("save"), state: workspace }),
   t.type({ action: t.literal("stores") }),
-  t.type({ action: t.literal("create"), name: t.string }),
+  t.type({ action: t.literal("create"), name: storeName }),
+  t.type({ action: t.literal("delete-store"), store: engineId }),
   t.type({ action: t.literal("models"), store: engineId }),
+  t.type({ action: t.literal("read-model"), target }),
   t.type({ action: t.literal("publish-model"), store: engineId, revision }),
   t.type({ action: t.literal("fetch-tuples"), store: engineId, job: t.string }),
   t.type({ action: t.literal("publish-tuples"), target, revision }),
@@ -85,7 +87,9 @@ export async function POST(request: Request) {
       case "save": return Response.json(await saveWorkspace(input.state));
       case "stores": return Response.json(await stores(signal));
       case "create": return Response.json(await createStore(input.name, signal));
+      case "delete-store": return Response.json(await deleteStore(input.store, signal));
       case "models": return Response.json(await models(input.store, signal));
+      case "read-model": return Response.json(await readModel(input.target, signal));
       case "publish-model": return Response.json(await publishSavedModel(input.store, input.revision, signal));
       case "fetch-tuples": {
         const tuples = await runJob(input.job, signal, (job, bounded) => readTuples(input.store, bounded, undefined, () => {

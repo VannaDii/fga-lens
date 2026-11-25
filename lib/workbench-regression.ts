@@ -1,7 +1,7 @@
 import type { Batch, BatchReport, Target } from "./workbench-contract";
 import { diagnose, OperationFailure } from "./workbench-errors";
 import { modelFingerprint } from "./workbench-models";
-import { createStore, endpoint, publishModel, readModel, reserve, runQuery, stageFixture, verifyFixture } from "./workbench-server";
+import { createStore, endpoint, publishModel, readModel, readStore, reserve, runQuery, stageFixture, verifyFixture } from "./workbench-server";
 import { captureWorkspace, checkpoint } from "./workbench-workspace";
 
 /** One staging workflow at a time can allocate or reuse the owned store for a given batch. */
@@ -19,8 +19,12 @@ export async function installFixture(batchId: string, source: Target, revision: 
     const batch = state.batches.find((entry) => entry.id === batchId);
     if (!batch) throw new OperationFailure("invalid input");
     const { id, ...content } = await readModel(source, signal);
-    const store = batch.installations?.[connection]?.store
-      ?? (await createStore("FGA Lens regression fixture", signal)).id;
+    const previous = batch.installations?.[connection]?.store;
+    const existing = previous ? await readStore(previous, signal).catch((error) => {
+      if (error instanceof OperationFailure && error.category === "missing target") return null;
+      throw error;
+    }) : null;
+    const store = existing?.id ?? (await createStore("FGA Lens regression fixture", signal)).id;
 
     /** Bind owned-store and installation changes to the batch and endpoint captured earlier. */
     const record = (fixture?: Target) => checkpoint((state) => ({
@@ -63,6 +67,7 @@ export async function runBatch(
   if (!cases.length || cases.length !== selected.size) throw new OperationFailure("invalid input");
   return reserve(fixture.store, "batch", async () => {
     try {
+      await readStore(fixture.store, signal);
       const sourceModel = await readModel(source, signal);
       const fixtureModel = await verifyFixture(fixture, batch.tuples, signal);
       if (modelFingerprint(sourceModel) !== modelFingerprint(fixtureModel)) throw new OperationFailure("conflict");

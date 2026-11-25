@@ -1,6 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import { parse, stringify } from "yaml";
 
+import { setCompare } from "./finding-helpers";
+
 import {
   capturedRequests,
   clearTraffic,
@@ -32,6 +34,8 @@ async function choose(page: Page, label: RegExp, display: string) {
   await option.click();
   await expect(selector).not.toHaveAttribute("aria-expanded", "true");
 }
+
+const resultHeading = (page: Page) => page.getByRole("heading", { name: "Result", exact: true }).locator("..");
 
 /** Observe a functioning public application route before interacting with its controls. */
 async function openScreen(page: Page, path: string) {
@@ -87,9 +91,10 @@ test("A10 and A12 · exact Check reaches the installed revision and shows both l
   await page.getByRole("button", { name: "Fetch store tuples", exact: true }).click();
   const fetched = page.getByRole("textbox", { name: /tuple yaml/i });
   await expect(fetched).toHaveValue(/organization:unrelated/);
-  await page.getByRole("link", { name: "Queries", exact: true }).click();
+  await page.getByRole("link", { name: "Query", exact: true }).click();
   await expect(page).toHaveURL(/\/queries\/?$/);
-  await page.getByRole("checkbox", { name: "Compare", exact: true }).uncheck();
+  await page.getByRole("combobox", { name: "Operation", exact: true }).selectOption("check");
+  await setCompare(page, false);
 
   await choose(page, /^view as$/i, "user:maya");
   await choose(page, /^object$/i, "organization:ca");
@@ -97,7 +102,7 @@ test("A10 and A12 · exact Check reaches the installed revision and shows both l
   await clearTraffic(request);
   await page.getByRole("button", { name: "Run", exact: true }).click();
 
-  await expect(page.getByText("Allowed", { exact: true })).toBeVisible();
+  await expect(resultHeading(page).getByText("Allowed", { exact: true })).toBeVisible();
   const checks = await capturedRequests(request, fixture.path + "/check");
   expect(checks[0]).toMatchObject({
     authorization_model_id: fixture.revision,
@@ -127,23 +132,24 @@ test("A14 · temporary grant changes only the captured request and clearing it r
   const fetched: unknown = parse(await yamlEditor.inputValue());
   if (!Array.isArray(fetched)) throw new Error("Fetched YAML should contain a tuple sequence");
   await yamlEditor.fill(stringify([...fetched, localGrant]));
-  const queries = page.getByRole("link", { name: "Queries", exact: true });
+  const queries = page.getByRole("link", { name: "Query", exact: true });
   await queries.click();
   await expect(page).toHaveURL(/\/queries\/?$/);
-  await page.getByRole("checkbox", { name: "Compare", exact: true }).uncheck();
+  await page.getByRole("combobox", { name: "Operation", exact: true }).selectOption("check");
+  await setCompare(page, false);
   await choose(page, /^view as$/i, "user:casey");
   await choose(page, /^object$/i, "organization:ca");
   await choose(page, /^relation$/i, "can_read");
 
   const run = page.getByRole("button", { name: "Run", exact: true });
   await run.click();
-  await expect(page.getByText("Denied", { exact: true })).toBeVisible();
+  await expect(resultHeading(page).getByText("Denied", { exact: true })).toBeVisible();
 
   const grant = page.getByRole("checkbox", { name: /user:casey.*member.*organization:ca/i });
   await grant.check();
   await clearTraffic(request);
   await run.click();
-  await expect(page.getByText("Allowed", { exact: true })).toBeVisible();
+  await expect(resultHeading(page).getByText("Allowed", { exact: true })).toBeVisible();
   const temporary = await capturedRequests(request, fixture.path + "/check");
   expect(temporary[0]).toMatchObject({
     authorization_model_id: fixture.revision,
@@ -155,7 +161,7 @@ test("A14 · temporary grant changes only the captured request and clearing it r
   expect(await readFixture(request, fixture.path)).toEqual(before);
   await clearTraffic(request);
   await run.click();
-  await expect(page.getByText("Denied", { exact: true })).toBeVisible();
+  await expect(resultHeading(page).getByText("Denied", { exact: true })).toBeVisible();
   const original = await capturedRequests(request, fixture.path + "/check");
   expect(original[0]).toMatchObject({
     authorization_model_id: fixture.revision,

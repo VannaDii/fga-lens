@@ -2,11 +2,30 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as t from "io-ts";
-import { X } from "lucide-react";
+import { ChevronDown, X } from "lucide-react";
 
 import { decode, failure, progress, tupleRejection, type Failure, type InstalledModel, type TupleIssue } from "@/lib/workbench-contract";
 
 const address = "/api/workbench";
+
+/** Use the workbench's shared appearance with native disclosure behavior. */
+export function Disclosure({ title, meta, preview, className, open, onOpenChange, children }: {
+  title: string; meta?: ReactNode; preview?: ReactNode; className?: string; open?: boolean; children: ReactNode;
+  onOpenChange?: (open: boolean) => void;
+}) {
+  return <details className={className ? "wb-disclosure " + className : "wb-disclosure"} open={open}
+    onToggle={onOpenChange && ((event) => {
+      if (event.target === event.currentTarget && event.currentTarget.open !== open) onOpenChange(event.currentTarget.open);
+    })}>
+    <summary>
+      <span>{title}</span>
+      {meta && <span className="wb-disclosure-meta">{meta}</span>}
+      <ChevronDown className="wb-disclosure-chevron" size={16} aria-hidden />
+      {preview}
+    </summary>
+    <div className="wb-disclosure-body">{children}</div>
+  </details>;
+}
 
 /** A decoded rejection for an attempted tuple publication, with safe row coordinates. */
 export class TuplePublishRejection extends Error {
@@ -94,10 +113,13 @@ export function revisionOptions(models: InstalledModel[]) {
 }
 
 /** A labelled native selector with optional display names and a full-value tooltip. */
-export function Select({ label, value, options, change, title }: {
-  label: string; value: string; options: Array<string | { value: string; label: string }>; change: (value: string) => void; title?: string;
+export function Select({ label, value, options, change, title, required }: {
+  label: string; value: string; options: Array<string | { value: string; label: string }>; change: (value: string) => void;
+  title?: string; required?: boolean;
 }) {
-  return <label>{label}<select title={title} value={value} onChange={(event) => change(event.target.value)}>
+  return <label>{required ? <span>{label}<span aria-hidden="true" className="wb-required-mark"> *</span></span> : label}
+    <select title={title} value={value} required={required} aria-invalid={required && !value ? true : undefined}
+      onChange={(event) => change(event.target.value)}>
     <option value="">Select {label.toLowerCase()}</option>
     {options.map((option) => typeof option === "string"
       ? <option key={option}>{option}</option>

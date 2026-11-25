@@ -180,18 +180,31 @@ export function readYaml(source: string) {
   return inspectTupleDraft(source).tuples;
 }
 
+/** Recognize strict JSON collections, leaving the shared empty-list syntax as YAML. */
+export function tupleSourceFormat(source: string): "yaml" | "json" {
+  const text = source.trim();
+  if (!/^[\[{]/.test(text) || /^\[\s*\]$/.test(text)) return "yaml";
+  try {
+    JSON.parse(text);
+    return "json";
+  } catch {
+    return "yaml";
+  }
+}
+
 /** Index tuples by the engine's replacement identity. */
 export function tupleIndex(tuples: Tuple[]) {
   return new Map(tuples.map((item) => [tupleKey(item), item]));
 }
 
-/** Retain native YAML comments and untouched sequence entries when values change. */
+/** Preserve the authored format and retain YAML comments when values change. */
 function patchTupleSource(source: string, before: Tuple[], after: Tuple[]) {
   const former = tupleIndex(before);
   const desired = tupleIndex(after);
   if (desired.size === former.size && after.every((entry) => sameTuple(entry, former.get(tupleKey(entry)) ?? null))) {
     return source;
   }
+  if (tupleSourceFormat(source) === "json") return JSON.stringify(after, null, 2) + "\n";
   const lines = new LineCounter();
   const document = parseDocument(source, { lineCounter: lines, logLevel: "silent" });
   for (let index = before.length - 1; index >= 0; index -= 1) {

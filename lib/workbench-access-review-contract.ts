@@ -19,9 +19,9 @@ export const reviewLink = t.type({
 export type ReviewLink = t.TypeOf<typeof reviewLink>;
 
 export const reviewCatalogCommand = t.type({ action: t.literal("access-review-catalog"), target, job: nonempty });
-export const reviewScopeCommand = t.type({
-  action: t.literal("access-review-scope"), target, root: concreteSubject, links: t.array(reviewLink), job: nonempty,
-});
+export const reviewScopeCommand = t.intersection([t.type({
+  action: t.literal("access-review-scope"), target, root: concreteSubject, job: nonempty,
+}), t.partial({ links: t.array(reviewLink) })]);
 const reviewItem = t.type({ id: correlation, object: reviewCheckObject, relation });
 export type ReviewItem = t.TypeOf<typeof reviewItem>;
 const reviewItems = t.refinement(t.array(reviewItem), (checks) =>
@@ -69,8 +69,7 @@ export type ReviewOutcome = t.TypeOf<typeof reviewOutcome>;
 export const reviewChecks = t.type({ results: t.array(reviewOutcome), observedAt: t.number });
 
 export const reviewPreferences = t.partial({
-  root: t.string, subject: t.string, rootType: nonempty, subjectType: nonempty, links: t.array(reviewLink),
-  promoted: t.array(nonempty),
+  root: t.string, subject: t.string,
 });
 export type ReviewPreferences = t.TypeOf<typeof reviewPreferences>;
 

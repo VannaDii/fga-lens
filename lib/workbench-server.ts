@@ -6,7 +6,7 @@ import {
 
 import {
   checkResponse, decode, engineId, expansionResponse, installedModel, modelsResponse,
-  objectsResponse, sameTuple, storedTuple, storesResponse, usersResponse,
+  objectsResponse, sameTuple, storedTuple, storeInfo, storesResponse, usersResponse,
   type ConditionContext, type Json, type ModelContent, type Query, type Target, type Tuple,
 } from "./workbench-contract";
 import { tupleIndex } from "./workbench-drafts";
@@ -33,6 +33,7 @@ async function upstream<A>(
   codec: t.Type<A>,
   signal: AbortSignal,
   body?: object,
+  method = body ? "POST" : "GET",
 ): Promise<A> {
   const connection = endpoint();
   if (!connection) throw new OperationFailure("invalid input");
@@ -41,7 +42,7 @@ async function upstream<A>(
   let response: Response;
   try {
     response = await fetch(connection + path, {
-      method: body ? "POST" : "GET",
+      method,
       headers: {
         ...(body ? { "content-type": "application/json" } : {}),
         ...(key ? { authorization: "Bearer " + key } : {}),
@@ -57,7 +58,7 @@ async function upstream<A>(
     throw new OperationFailure(timeout.aborted ? "timeout" : "connection");
   }
   try {
-    const payload = await response.json();
+    const payload = response.status === 204 ? {} : await response.json();
     if (!response.ok) {
       const description = decode(t.type({ code: t.union([t.string, t.number]), message: t.string }), payload);
       if (!description) throw new OperationFailure("server error");
@@ -116,7 +117,20 @@ export async function models(store: string, signal: AbortSignal) {
 
 /** Create an empty store. */
 export function createStore(name: string, signal: AbortSignal) {
-  return upstream("/stores", t.type({ id: engineId, name: t.string }), signal, { name });
+  return upstream("/stores", storeInfo, signal, { name });
+}
+
+/** Read the named store before reusing a persisted fixture binding. */
+export function readStore(store: string, signal: AbortSignal) {
+  return upstream("/stores/" + id(store), storeInfo, signal);
+}
+
+/** Delete the store under the same reservation as publication and regression writes. */
+export function deleteStore(store: string, signal: AbortSignal) {
+  return reserve(store, "publish", async () => {
+    await upstream("/stores/" + id(store), t.type({}), signal, undefined, "DELETE");
+    return { deleted: true as const };
+  });
 }
 
 /** Read one exact published revision. */

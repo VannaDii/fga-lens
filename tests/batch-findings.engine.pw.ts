@@ -157,6 +157,28 @@ test("F11 report distinguishes duplicate case occurrences and equal-boolean Chec
   await expect(rows.nth(2)).toContainText(/(?:case\s+2\b|2[.)]\s*Repeated case)/i, { timeout: 1600 });
 });
 
+test("publishing a batch again replaces a deleted fixture store", async ({ page, request }) => {
+  const { batch, fixture } = await stageBatch(request, "Replace deleted fixture store");
+  expect((await appRequest(request, { action: "delete-store", store: fixture.store })).ok()).toBe(true);
+  expect((await batchCommand(request, batch, crypto.randomUUID())).status()).toBe(404);
+  await page.goto("/batches");
+  const publish = page.getByRole("button", { name: "Publish fixture", exact: true });
+  const run = page.getByRole("button", { name: "Run selected", exact: true });
+  await expect(publish).toBeEnabled();
+  await expect(run).toBeDisabled();
+  await expect(page.getByText("Fixture needs verification", { exact: true })).toBeVisible();
+  await publish.click();
+  await expect(run).toBeEnabled();
+  const { state, endpoint } = await workspace(request);
+  const replacement = state.batches.find(({ id }) => id === batch.id)?.installations?.[endpoint]?.fixture;
+  expect(replacement?.store).toBeTruthy();
+  expect(replacement?.store).not.toBe(fixture.store);
+  const rerun = await batchCommand(request, batch, crypto.randomUUID());
+  expect(rerun.ok()).toBe(true);
+  const receipt: WorkspaceView = await rerun.json();
+  expect(receipt.state.report?.rows.map(({ status }) => status)).toEqual(["pass", "pass", "pass"]);
+});
+
 test("F11 an overwritten authored case does not shrink the last completed run", async ({ page, request }) => {
   const { batch } = await stageBatch(request, "Stable completed totals");
   const complete = await batchCommand(request, batch, crypto.randomUUID());

@@ -6,11 +6,12 @@ import { Info } from "lucide-react";
 
 import type { Draft, InstalledModel, Tuple } from "@/lib/workbench-contract";
 import { sameTuple, tupleKey } from "@/lib/workbench-contract";
-import { inspectTupleDraft, tupleDraftIssue, tupleIndex, tupleSourceRange } from "@/lib/workbench-drafts";
+import { inspectTupleDraft, tupleDraftIssue, tupleIndex, tupleSourceFormat, tupleSourceRange } from "@/lib/workbench-drafts";
 import { DirectTuples, indexInstances, InstanceGraph } from "./workbench-instance-graph";
 import { TuplePublishDiagnostics, type TuplePublishFeedback } from "./workbench-tuple-diagnostics";
-import { Dialog, Select } from "./workbench-ui";
+import { Dialog, Disclosure, Select } from "./workbench-ui";
 import { SourceEditor } from "./source-editor";
+import { highlightStructuredSource, JsonBlock } from "./workbench-source-syntax";
 
 /** Let the shared header open the active Instances screen's existing creation dialog. */
 export type InstanceDialogHandle = { openNewInstance: () => void };
@@ -18,15 +19,7 @@ export type InstanceDialogHandle = { openNewInstance: () => void };
 /** Show counts from the actual receipt separately from persisted publication history. */
 export type TuplePublishCounts = { completed: number; pending: number };
 
-/** Use the source editor palette for YAML mapping keys and comments. */
-function paintTupleLine(line: string) {
-  const match = /^(\s*(?:-\s+)?)([\w.-]+)(:)(?=\s|$)/.exec(line);
-  if (match) return <>{match[1]}<span className="syntax-keyword">{match[2]}</span>
-    <span className="syntax-punctuation">{match[3]}</span>{line.slice(match[0].length)}</>;
-  return line.trimStart().startsWith("#") ? <span className="syntax-comment">{line}</span> : line;
-}
-
-/** Edit tuple YAML and inspect authored objects and the concrete relationship graph. */
+/** Edit tuple source and inspect authored objects and the concrete relationship graph. */
 export function InstancesScreen({ draft, model, edit, add, notice, progress, resolve, selections, remember, recover, committingFetch, ref,
   actions, sync, publication, publicationSourceMatches, publishNotice, publishCounts }: {
   draft: Draft; model?: InstalledModel; edit: (yaml: string) => void; add: (value: string) => void;
@@ -49,6 +42,8 @@ export function InstancesScreen({ draft, model, edit, add, notice, progress, res
   const inspectorClose = useRef<HTMLButtonElement>(null);
   const editor = useRef<HTMLTextAreaElement>(null);
   const { tuples: parsed, issue } = useMemo(() => inspectTupleDraft(draft.yaml), [draft.yaml]);
+  const format = useMemo(() => tupleSourceFormat(draft.yaml), [draft.yaml]);
+  const highlighted = useMemo(() => highlightStructuredSource(draft.yaml, format), [draft.yaml, format]);
   const records = parsed ?? draft.baseline;
   const types = model?.type_definitions.map((entry) => entry.type) ?? [];
   const instances = useMemo(() => indexInstances(records, draft.inventory), [records, draft.inventory]);
@@ -61,7 +56,7 @@ export function InstancesScreen({ draft, model, edit, add, notice, progress, res
   const completed = publishCounts?.completed ?? draft.tupleCompleted;
   const pending = publishCounts?.pending ?? draft.tuplePending;
 
-  /** Select the exact authored text while keeping keyboard focus in the editable YAML. */
+  /** Select the exact authored text while keeping keyboard focus in the editor. */
   function jump(start: number, end: number) {
     editor.current?.focus();
     editor.current?.setSelectionRange(start, end);
@@ -107,7 +102,7 @@ export function InstancesScreen({ draft, model, edit, add, notice, progress, res
       <header className="wb-pane-heading">
         <div className="wb-heading-label">
           <h1>Instances</h1>
-          <button type="button" className="wb-icon-button wb-tuple-info" aria-label="Tuple sync information"
+          <button type="button" className="wb-icon-button wb-icon-button-quiet" aria-label="Tuple sync information"
             popoverTarget={syncInfo}><Info size={17} aria-hidden /></button>
           <div id={syncInfo} popover="auto" className="wb-sync-popover" role="region" aria-label="Tuple sync">
             <strong>Tuple sync</strong>
@@ -126,19 +121,22 @@ export function InstancesScreen({ draft, model, edit, add, notice, progress, res
         if (editor.current?.value === publication.draft.yaml) jump(start, end);
       } : undefined} />}
       {issue && <p role="alert" id="tuple-draft-issue">{tupleDraftIssue(issue)}</p>}
-      <p className="wb-tuple-help" id="tuple-yaml-help">Create an object with <strong>New instance</strong>. In tuple YAML, <code>user</code> is the subject and can be an organization or another object.</p>
+      <p className="wb-tuple-help" id="tuple-source-help">Create an object with <strong>New instance</strong>. In a tuple, <code>user</code> is the subject and can be an organization or another object.</p>
       <div className="live-editor wb-tuple-editor">
-        <div className="code-toolbar"><span>tuples.yaml</span></div>
-        <SourceEditor aria-label="Tuple YAML" ref={editor} paintLine={paintTupleLine}
+        <div className="code-toolbar"><span>tuples.{format}</span></div>
+        <SourceEditor aria-label={format === "json" ? "Tuple JSON" : "Tuple YAML"} ref={editor}
+          paintLine={(line, index) => highlighted[index]?.length ? highlighted[index] : line}
           diagnosticLines={issue ? new Set([issue.line]) : undefined}
-          readOnly={committingFetch} aria-invalid={Boolean(issue)} aria-describedby={issue ? "tuple-yaml-help tuple-draft-issue" : "tuple-yaml-help"}
+          readOnly={committingFetch} aria-invalid={Boolean(issue)} aria-describedby={issue ? "tuple-source-help tuple-draft-issue" : "tuple-source-help"}
           value={draft.yaml} onChange={(event) => edit(event.target.value)} />
       </div>
-      {draft.conflicts.map((conflict) => <details key={conflict.key}><summary>Tuple conflict {conflict.key}</summary>
-        <pre>{JSON.stringify({ local: conflict.local, server: conflict.server }, null, 2)}</pre>
-        <button disabled={committingFetch} onClick={() => resolve(conflict, true)}>Use server</button>
-        <button disabled={committingFetch} onClick={() => resolve(conflict, false)}>Keep local</button>
-      </details>)}
+      {draft.conflicts.map((conflict) => <Disclosure key={conflict.key} title={"Tuple conflict " + conflict.key}>
+        <JsonBlock value={{ local: conflict.local, server: conflict.server }} />
+        <div className="wb-actions">
+          <button disabled={committingFetch} onClick={() => resolve(conflict, true)}>Use server</button>
+          <button disabled={committingFetch} onClick={() => resolve(conflict, false)}>Keep local</button>
+        </div>
+      </Disclosure>)}
     </section>
     <section className="wb-pane wb-graph-pane">
       <header className="wb-pane-heading"><h2>Instance graph</h2></header>

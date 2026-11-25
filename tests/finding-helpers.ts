@@ -86,6 +86,16 @@ export async function openTarget(page: Page, target: FixtureTarget, screen: "ins
   if (await revision.inputValue() !== target.revision) await revision.selectOption(target.revision);
 }
 
+/** Set comparison mode through the Query disclosure. */
+export async function setCompare(page: Page, open: boolean) {
+  const toggle = page.locator("summary").filter({ hasText: /^Compare$/ });
+  await expect(toggle).toBeVisible();
+  if ((await toggle.locator("..").getAttribute("open") !== null) !== open) await toggle.click();
+  const alternate = page.getByRole("combobox", { name: "Alternate store", exact: true });
+  if (open) await expect(alternate).toBeVisible();
+  else await expect(alternate).toBeHidden();
+}
+
 /** Wait for the fetch's own completed status so subsequent edits see its baseline. */
 export async function fetchInstances(page: Page) {
   const finished = page.getByRole("button", { name: "Fetch store tuples", exact: true });

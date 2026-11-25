@@ -5,29 +5,32 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import * as t from "io-ts";
-import { Settings } from "lucide-react";
+import { RefreshCw, Settings } from "lucide-react";
 
 import { FgaLens, LogoMark } from "./fga-lens";
 import { AccessReviewScreen } from "./workbench-access-review";
 import { QueryScreen } from "./workbench-queries";
 import { BatchScreen } from "./workbench-batches";
 import { InstancesScreen, type InstanceDialogHandle, type TuplePublishCounts } from "./workbench-instances";
+import { StoreSettings } from "./workbench-stores";
 import type { TuplePublishFeedback } from "./workbench-tuple-diagnostics";
 import { useWorkbenchState } from "./workbench-state";
 import { Dialog, download, failureText, invoke, JobStatus, revisionOptions, Select, TuplePublishRejection } from "./workbench-ui";
 import { chromeTint } from "@/lib/workbench-appearance";
 import {
-  engineId, modelsResponse, sameTuple, screen, storesResponse, tuple, tupleKey, tuplePublicationResult, workspaceView,
-  type Draft, type InstalledModel, type Target, type Tuple, type Workspace, type WorkspaceView,
+  modelsResponse, sameTuple, screen, storeDeletion, storeInfo, storesResponse, tuple, tupleKey, tuplePublicationResult, workspaceView,
+  type Draft, type InstalledModel, type StoreInfo, type Target, type Tuple, type Workspace, type WorkspaceView,
 } from "@/lib/workbench-contract";
 import {
   emptyDraft, inspectTupleDraft, mergeFetched, publicationConflicts, readYaml, resolveTupleSource, tupleDraftIssue, tupleIndex,
 } from "@/lib/workbench-drafts";
 
-const screens = { model: "Model", instances: "Instances", queries: "Queries", "access-review": "Access Review", batches: "Batches" };
+const screens = { model: "Model", instances: "Instances", queries: "Query", batches: "Batches", explore: "Explore" };
 type Editor = "model" | "instances";
 const appearance = t.keyof({ system: null, dark: null, light: null });
 const appearances = { system: "System", dark: "Dark", light: "Light" } as const;
+const settingsTabs = ["General", "Stores"] as const;
+type SettingsTab = typeof settingsTabs[number];
 
 /** Identify the editor snapshot that can receive a diagnostic source jump. */
 type TupleAttempt = { selectedRevision: string; draft: Draft };
@@ -64,17 +67,14 @@ function tupleChanges(records: Tuple[], baseline: Tuple[]) {
   return records.length !== stored.size || records.some((row) => !sameTuple(row, stored.get(tupleKey(row)) ?? null));
 }
 
-/** Report synchronization for the visible editor and the time of its last check. */
-function EditorSync({ editor, draft }: { editor: Editor; draft: Draft }) {
-  const model = editor === "model";
-  const checked = model ? draft.modelChecked : draft.tuplesChecked;
-  const local = model ? null : readYaml(draft.yaml);
-  const status = model
-    ? draft.dsl !== draft.validDsl ? "Draft issues" : draft.published && draft.publishedDsl === draft.dsl ? "In sync" : "Local draft"
-    : draft.conflicts.length ? "Conflict" : draft.replacement ? "Interrupted" : !local ? "Draft issues"
-      : tupleChanges(local, draft.baseline) ? "Pending edits" : checked ? "In sync" : "Unfetched";
+/** Report tuple synchronization and the time of its last check. */
+function TupleSync({ draft }: { draft: Draft }) {
+  const checked = draft.tuplesChecked;
+  const local = readYaml(draft.yaml);
+  const status = draft.conflicts.length ? "Conflict" : draft.replacement ? "Interrupted" : !local ? "Draft issues"
+    : tupleChanges(local, draft.baseline) ? "Pending edits" : checked ? "In sync" : "Unfetched";
   const time = checked ? new Date(checked) : null;
-  return <span className="wb-sync" aria-live="polite">{model ? "Model" : "Tuples"} · {status}
+  return <span className="wb-sync" aria-live="polite">Tuples · {status}
     {time && Number.isFinite(time.getTime()) && <> · <time dateTime={time.toISOString()}>{time.toLocaleTimeString()}</time></>}
   </span>;
 }
@@ -112,20 +112,19 @@ export function Workbench({ children }: { children: ReactNode }) {
   const router = useRouter();
   const { state, current, change, accept, persist, savedRevision, trackCheckpoint, durable } = useWorkbenchState();
   const [view, setView] = useState<WorkspaceView | null>(null);
-  const [storeList, setStoreList] = useState<t.TypeOf<typeof storesResponse>["stores"]>([]);
+  const [storeList, setStoreList] = useState<StoreInfo[]>([]);
   const [revisions, setRevisions] = useState<InstalledModel[]>([]);
   const [connected, setConnected] = useState(false);
-  const [settings, setSettings] = useState(false);
+  const [settings, setSettings] = useState<SettingsTab | null>(null);
   const [notice, setNotice] = useState("");
   const [editorNotices, setEditorNotices] = useState<Record<string, string>>({});
-  const [create, setCreate] = useState(false);
-  const [name, setName] = useState("");
   const [fetchJob, setFetchJob] = useState("");
   const [fetchCommitKey, setFetchCommitKey] = useState<string | null>(null);
   const [activePublishes, setActivePublishes] = useState<string[]>([]);
   const [failedModel, setFailedModel] = useState<Record<string, string>>({});
   const [tuplePublications, setTuplePublications] = useState<Record<string, TuplePublication>>({});
   const instanceDialog = useRef<InstanceDialogHandle>(null);
+  const storeRefresh = useRef(0);
   const selectionEpoch = useRef(new Map<string, number>());
   /** Latest model Publish attempt per endpoint and store, independent of receipt ordering. */
   const modelAttempts = useRef(new Map<string, symbol>());
@@ -133,6 +132,7 @@ export function Workbench({ children }: { children: ReactNode }) {
   const fetchApplies = useRef(new Map<string, Promise<void>>());
   const jobs = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const route = pathname.slice(1);
+  const viewingSource = route === "model/source";
   const active = screen.is(route) ? route : "model";
   const savedAppearance = state.selections?.appearance;
   const theme = appearance.is(savedAppearance) ? savedAppearance : "system";
@@ -170,7 +170,7 @@ export function Workbench({ children }: { children: ReactNode }) {
       const recognized = window.location.pathname.slice(1);
       accept(receipt, (_, loaded) => loaded);
       setView(receipt);
-      if (!receipt.state.revision && !receipt.recovery) {
+      if (!receipt.state.revision && !receipt.recovery && recognized !== "model/source") {
         let dsl: string | null = null;
         let validDsl: string | null = null;
         try {
@@ -203,24 +203,28 @@ export function Workbench({ children }: { children: ReactNode }) {
 
   /** Refresh available stores without publishing or blocking local drafts. */
   const loadStores = useCallback(async () => {
+    const request = ++storeRefresh.current;
     try {
       const result = await invoke(storesResponse, { action: "stores" });
+      if (request !== storeRefresh.current) return;
       setStoreList(result.stores);
       setConnected(true);
       setNotice((prior) => prior.startsWith("Connect to OpenFGA") ? "" : prior);
     } catch (error) {
+      if (request !== storeRefresh.current) return;
       setConnected(false);
       showError("Connect to OpenFGA", error instanceof Error ? error : new Error("connection"));
+      throw error;
     }
   }, [showError]);
 
   useEffect(() => {
-    if (view) queueMicrotask(() => { void loadStores(); });
+    if (view) queueMicrotask(() => { void loadStores().catch(() => undefined); });
   }, [view, loadStores]);
 
   /** Keep an intentionally selected revision, with the newest installed option as first default. */
   useEffect(() => {
-    if (!store || !view) return;
+    if (!store || !view || viewingSource) return;
     let live = true;
     const capturedKey = endpoint + "/" + store;
     void invoke(modelsResponse, { action: "models", store }).then(({ authorization_models }) => {
@@ -234,7 +238,7 @@ export function Workbench({ children }: { children: ReactNode }) {
       void persist(selectDefault).catch((error) => showError("Save model revision", error));
     }).catch((error) => { if (live) showError("Load model revisions", error); });
     return () => { live = false; };
-  }, [store, view, endpoint, current, change, persist, showError]);
+  }, [store, view, viewingSource, endpoint, current, change, persist, showError]);
 
   /** Apply a non-editor preference or selection without including unsaved draft data. */
   const remember = useCallback((update: (prior: Workspace) => Workspace) => {
@@ -515,10 +519,36 @@ export function Workbench({ children }: { children: ReactNode }) {
   /** Restore focus to the Settings trigger when the dialog closes. */
   function openSettings(event: MouseEvent<HTMLButtonElement>) {
     event.currentTarget.focus();
-    setSettings(true);
+    setSettings("General");
   }
 
-  if (route && !screen.is(route)) return children;
+  /** Add the confirmed store immediately so its new selection is available to every screen. */
+  async function addStore(name: string) {
+    const created = await invoke(storeInfo, { action: "create", name });
+    ++storeRefresh.current;
+    setStoreList((stores) => [created, ...stores.filter((entry) => entry.id !== created.id)]);
+    setConnected(true);
+    setNotice((prior) => prior.startsWith("Connect to OpenFGA") ? "" : prior);
+    selectStore(created.id);
+  }
+
+  /** Clear deleted selections only after OpenFGA acknowledges the deletion. */
+  async function removeStore(id: string) {
+    await invoke(storeDeletion, { action: "delete-store", store: id });
+    ++storeRefresh.current;
+    setStoreList((stores) => stores.filter((entry) => entry.id !== id));
+    if (current.current.store === id) setRevisions([]);
+    remember((prior) => ({
+      ...prior,
+      ...(prior.store === id ? { store: "", model: "" } : {}),
+      selections: { ...prior.selections,
+        ...(prior.store === id ? { ["primary-store/" + endpoint]: "" } : {}),
+        ...(prior.selections?.alternateStore === id ? { alternateStore: "", alternateRevision: "" } : {}),
+      },
+    }));
+  }
+
+  if (route && !screen.is(route) && !viewingSource) return children;
   const editor = active === "model" || active === "instances" ? active : null;
   const tupleReport = tuplePublication?.report;
   const tupleSourceMatches = tupleReport?.selectedRevision === target.revision && tupleReport.draft.yaml === draft.yaml;
@@ -540,7 +570,6 @@ export function Workbench({ children }: { children: ReactNode }) {
     <div className="wb-publish-group">
       <button type="button" className="wb-publish" disabled={!(editor === "model" ? store : target.revision)
         || activePublishes.includes(editor + "/" + key)} onClick={() => saveCurrent(editor, true)}>{publishLabel}</button>
-      {editor === "model" && <EditorSync editor={editor} draft={draft} />}
     </div>
   </div>;
   const connection = connected ? "Connected" : "Offline";
@@ -552,19 +581,19 @@ export function Workbench({ children }: { children: ReactNode }) {
           <nav aria-label="Workbench">{Object.entries(screens).map(([path, label]) =>
             <Link key={path} href={"/" + path} aria-current={active === path ? "page" : undefined}>{label}</Link>)}</nav>
         </div>
-        <div className="wb-header-context">
-          {active !== "batches" && <>
-            <div className="wb-header-target">
-              <Select label="Store" value={store} title={storeName ? `${storeName} · ${store}` : store || undefined}
-                options={storeList.map((item) => ({ value: item.id, label: item.name }))} change={selectStore} />
-              <Select label="Model revision" value={state.model} title={state.model || undefined}
-                options={revisionOptions(revisions)} change={selectRevision} />
-            </div>
-            {!storeList.length && <button type="button" onClick={(event) => {
-              event.currentTarget.focus();
-              setCreate(true);
-            }}>Create store</button>}
-          </>}
+        <div className="wb-header-context" data-hide-target={active === "batches" || viewingSource || undefined}>
+          <div className="wb-header-target">
+            <Select label="Store" required={active === "queries"} value={active === "queries" && !storeName ? "" : store}
+              title={storeName ? `${storeName} · ${store}` : store || undefined}
+              options={storeList.map((item) => ({ value: item.id, label: item.name }))} change={selectStore} />
+            <Select label="Model revision" required={active === "queries"} value={active === "queries" && !model ? "" : state.model}
+              title={state.model || undefined}
+              options={revisionOptions(revisions)} change={selectRevision} />
+          </div>
+          {!storeList.length && <button type="button" onClick={(event) => {
+            event.currentTarget.focus();
+            setSettings("Stores");
+          }}>Create store</button>}
           <div className="wb-header-services">
             <button type="button" className="wb-settings-trigger" aria-label="Settings" aria-describedby="wb-connection-status"
               title={"Settings · " + connection} onClick={openSettings}>
@@ -577,8 +606,9 @@ export function Workbench({ children }: { children: ReactNode }) {
     </header>
     {view?.recovery && <p role="status" className="wb-notice">Saved workspace could not be decoded · {view.location} ·
       <Link prefetch={false} download href="/api/workbench?recovery">Download saved workspace</Link></p>}
-    {notice && !settings && !create && <p role="status" className="wb-notice">{notice}</p>}
-    {active === "model" && <>
+    {notice && !settings && <p role="status" className="wb-notice">{notice}</p>}
+    {viewingSource && children}
+    {active === "model" && !viewingSource && <>
       {(modelNotice || usePublished) && <div className="wb-actions wb-editor-feedback">
         {modelNotice.includes("conflict") && <button onClick={() => download("local-model-draft.fga", draft.dsl)}>Download local draft</button>}
         {usePublished
@@ -592,7 +622,7 @@ export function Workbench({ children }: { children: ReactNode }) {
       }} />}
     </>}
     {active === "instances" && <InstancesScreen key={key} draft={draft} model={model} ref={instanceDialog}
-      actions={actions} sync={<EditorSync editor="instances" draft={draft} />}
+      actions={actions} sync={<TupleSync draft={draft} />}
       publication={tupleReport} publicationSourceMatches={tupleSourceMatches}
       publishNotice={tuplePublication?.notice} publishCounts={tuplePublication?.counts}
       selections={Object.fromEntries(Object.entries(state.selections ?? {}).filter(([name]) => name.startsWith(key + "/instance"))
@@ -624,10 +654,11 @@ export function Workbench({ children }: { children: ReactNode }) {
         return persist(update).then(() => change(update));
       },
     }} />}
-    {active === "access-review" && <AccessReviewScreen key={reviewKey} target={target}
+    {active === "explore" && <AccessReviewScreen key={reviewKey} target={target}
       preferenceKey={reviewKey} saved={state.selections?.[reviewKey]} remember={rememberKeys} />}
     {active === "batches" && <BatchScreen state={state} target={target} stores={storeList} endpoint={endpoint}
       remember={rememberKeys}
+      refreshStores={loadStores}
       add={async (batch) => {
         const update = (prior: Workspace) => ({ ...prior, batches: [...prior.batches, batch] });
         await persist(update);
@@ -635,47 +666,53 @@ export function Workbench({ children }: { children: ReactNode }) {
       }}
       savedRevision={savedRevision} trackCheckpoint={trackCheckpoint}
       apply={(receipt) => accept(receipt, (prior, persisted) => ({ ...prior, batches: persisted.batches, report: persisted.report }), true)} />}
-    {settings && <Dialog title="Settings" iconClose close={() => setSettings(false)}>
-      <div className="wb-settings">
-        <dl className="wb-settings-values">
-          <div><dt>Connection</dt><dd className="wb-settings-connection">
-            <span role="status"><span className="wb-connection-dot" data-connected={connected || undefined} />{connection}</span>
-            <button type="button" onClick={loadStores}>Retry connection</button>
-          </dd></div>
-          <div><dt>Endpoint</dt><dd><code>{endpoint || "Unavailable"}</code></dd></div>
-          <div><dt>Workspace</dt><dd><code>{view?.location ?? "Loading"}</code></dd></div>
-        </dl>
-        {notice.startsWith("Connect to OpenFGA") && <p role="status">{notice}</p>}
-        <div className="wb-settings-group">
-          <strong id="workbench-appearance">Appearance</strong>
-          <div className="wb-theme-picker" role="group" aria-labelledby="workbench-appearance">
-            {Object.entries(appearances).map(([value, label]) => <button type="button" key={value}
-              aria-pressed={theme === value} onClick={() => rememberKeys({ appearance: value })}>{label}</button>)}
+    {settings && <Dialog title="Settings" iconClose close={() => setSettings(null)}>
+      <div className="wb-settings-tabs" role="tablist" aria-label="Settings sections">
+        {settingsTabs.map((tab, index) => <button key={tab} type="button" id={"settings-tab-" + tab}
+          role="tab" aria-selected={settings === tab} aria-controls={"settings-panel-" + tab} tabIndex={settings === tab ? 0 : -1}
+          onClick={() => setSettings(tab)} onKeyDown={(event) => {
+            const next = event.key === "Home" ? settingsTabs[0] : event.key === "End" ? settingsTabs[1]
+              : event.key === "ArrowRight" || event.key === "ArrowLeft" ? settingsTabs[1 - index] : undefined;
+            if (!next) return;
+            event.preventDefault();
+            document.getElementById("settings-tab-" + next)?.focus();
+            setSettings(next);
+          }}>{tab}</button>)}
+      </div>
+      <div role="tabpanel" id="settings-panel-General" aria-labelledby="settings-tab-General" hidden={settings !== "General"}>
+        <div className="wb-settings">
+          <dl className="wb-settings-values">
+            <div><dt>Connection</dt><dd className="wb-settings-connection">
+              <span role="status"><span className="wb-connection-dot" data-connected={connected || undefined} />{connection}</span>
+              <button type="button" className="wb-icon-button wb-icon-button-quiet" aria-label="Retry connection" title="Retry connection"
+                onClick={() => void loadStores().catch(() => undefined)}><RefreshCw size={16} aria-hidden /></button>
+            </dd></div>
+            <div><dt>Endpoint</dt><dd><code>{endpoint || "Unavailable"}</code></dd></div>
+            <div><dt>Workspace</dt><dd><code>{view?.location ?? "Loading"}</code></dd></div>
+          </dl>
+          {notice.startsWith("Connect to OpenFGA") && <p role="status">{notice}</p>}
+          <div className="wb-settings-group">
+            <strong id="workbench-appearance">Appearance</strong>
+            <div className="wb-theme-picker" role="group" aria-labelledby="workbench-appearance">
+              {Object.entries(appearances).map(([value, label]) => <button type="button" key={value}
+                aria-pressed={theme === value} onClick={() => rememberKeys({ appearance: value })}>{label}</button>)}
+            </div>
+          </div>
+          <div className="wb-settings-group">
+            <label><input type="checkbox" checked={state.autoSave} onChange={(event) => {
+              const autoSave = event.target.checked;
+              remember((prior) => ({ ...prior, autoSave }));
+            }} /> Auto-save</label>
+            <label><input type="checkbox" checked={state.autoPublish} onChange={(event) => {
+              const autoPublish = event.target.checked;
+              remember((prior) => ({ ...prior, autoPublish }));
+            }} /> Auto-publish</label>
           </div>
         </div>
-        <div className="wb-settings-group">
-          <label><input type="checkbox" checked={state.autoSave} onChange={(event) => {
-            const autoSave = event.target.checked;
-            remember((prior) => ({ ...prior, autoSave }));
-          }} /> Auto-save</label>
-          <label><input type="checkbox" checked={state.autoPublish} onChange={(event) => {
-            const autoPublish = event.target.checked;
-            remember((prior) => ({ ...prior, autoPublish }));
-          }} /> Auto-publish</label>
-        </div>
       </div>
-    </Dialog>}
-    {create && <Dialog title="Create store" close={() => setCreate(false)}>
-      <form onSubmit={(event) => {
-        event.preventDefault();
-        void invoke(t.type({ id: engineId }), { action: "create", name }).then((created) => {
-          selectStore(created.id);
-          setCreate(false);
-          return loadStores();
-        }).catch((error) => showError("Create store", error));
-      }}><label>Store name<input required value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <button type="submit">Create store</button></form>
-      {notice.startsWith("Create store") && <p role="status">{notice}</p>}
+      <div role="tabpanel" id="settings-panel-Stores" aria-labelledby="settings-tab-Stores" hidden={settings !== "Stores"}>
+        <StoreSettings stores={storeList} selected={store} connected={connected} refresh={loadStores} create={addStore} remove={removeStore} />
+      </div>
     </Dialog>}
   </div>;
 }

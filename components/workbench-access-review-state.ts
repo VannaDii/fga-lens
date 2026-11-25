@@ -3,13 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  reviewChecks, reviewPair, type ReviewItem, type ReviewOutcome, type ReviewResource, type ReviewScope,
+  reviewCheckObject, reviewChecks, reviewPair, type ReviewOutcome, type ReviewScope,
 } from "@/lib/workbench-access-review-contract";
 import { canonical, type ConditionContext, type Target } from "@/lib/workbench-contract";
 
 import { invoke } from "./workbench-ui";
 
-type Row = ReviewOutcome | { unavailable: true };
+type Row = ReviewOutcome | { unavailable: true; reason?: "object-too-long" };
 type Run = {
   key: string;
   rows: Map<string, Row>;
@@ -29,21 +29,23 @@ function isSharedFailure(error: string) {
 
 /** Queue whole captured checks, with two bounded requests and no retries. */
 export function useReviewEvaluation(
-  scope: ReviewScope | undefined, target: Target, subject: string, context: ConditionContext, enabled: boolean, visible: ReviewResource[], selection: number,
+  scope: ReviewScope | undefined, target: Target, subject: string, context: ConditionContext, enabled: boolean, selection: number,
 ) {
   const { store, revision } = target;
   const cases = useMemo(() => casesFor(scope), [scope]);
   const key = scope && subject ? JSON.stringify([scope.root, scope.observedAt, subject, selection, canonical(context)]) : "";
   const [value, setValue] = useState<Run>();
   const cancel = useRef<() => void>(null);
-  const shown = useRef(new Set<string>());
-  useEffect(() => { shown.current = new Set(visible.map(({ object }) => object)); }, [visible]);
 
   useEffect(() => {
     if (!enabled || !key || !cases.length) return;
     const controller = new AbortController();
-    const jobs = new Set(cases.map((entry, index) => ({ ...entry, id: "check-" + index })));
+    const jobs = new Set<{ object: string; relation: string; id: string }>();
     const rows = new Map<string, Row>();
+    cases.forEach((entry, index) => {
+      if (reviewCheckObject.is(entry.object)) jobs.add({ ...entry, id: "check-" + index });
+      else rows.set(reviewPair(entry.object, entry.relation), { unavailable: true, reason: "object-too-long" });
+    });
     let diagnostic: string | undefined;
     let observedAt: number | undefined;
     let sharedFailure = false;
@@ -60,11 +62,7 @@ export function useReviewEvaluation(
 
     async function worker() {
       while (jobs.size && !controller.signal.aborted && !sharedFailure) {
-        const pending = [...jobs];
-        const batch: ReviewItem[] = [
-          ...pending.filter(({ object }) => shown.current.has(object)),
-          ...pending.filter(({ object }) => !shown.current.has(object)),
-        ].slice(0, 25);
+        const batch = [...jobs].slice(0, 25);
         for (const entry of batch) jobs.delete(entry);
         try {
           const reply = await invoke(reviewChecks, {

@@ -5,7 +5,7 @@ import { useState, type ReactNode, type Ref, type TextareaHTMLAttributes } from 
 type SourceProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onScroll"> & {
   value: string;
   ref: Ref<HTMLTextAreaElement>;
-  paintLine: (line: string) => ReactNode;
+  paintLine: (line: string, index: number) => ReactNode;
   selectedLine?: number;
   diagnosticLines?: ReadonlySet<number>;
 };
@@ -23,7 +23,7 @@ export function SourceEditor({ value, ref, paintLine, selectedLine, diagnosticLi
           className={["editor-row", selectedLine === number && "highlighted", diagnosticLines?.has(number) && "diagnostic"]
             .filter(Boolean).join(" ")}>
           <span className="editor-line-number">{number}</span>
-          <code>{paintLine(line || " ")}</code>
+          <code>{paintLine(line || " ", index)}</code>
         </span>;
       })}
     </pre>

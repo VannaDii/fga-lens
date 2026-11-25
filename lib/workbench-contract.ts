@@ -44,6 +44,9 @@ export type Tuple = t.TypeOf<typeof tuple>;
 export const target = t.type({ store: engineId, revision: engineId });
 export type Target = t.TypeOf<typeof target>;
 
+/** One-based line in the DSL generated from an installed model. */
+export const modelSourceLine = t.refinement(t.number, (line) => Number.isSafeInteger(line) && line > 0);
+
 /** Accepted subject reference within authorization-model relation metadata. */
 const relationRef = t.intersection([t.type({ type: nonempty }), t.partial({
   relation: t.string, condition: t.string, wildcard: t.type({}),
@@ -197,8 +200,12 @@ export const draft = t.intersection([t.type({
 export type Draft = t.TypeOf<typeof draft>;
 
 /** The named routes that can be restored by the workbench. */
-export const screen = t.keyof({ model: null, instances: null, queries: null, "access-review": null, batches: null });
+export const screen = t.keyof({ model: null, instances: null, queries: null, batches: null, explore: null });
 export type Screen = t.TypeOf<typeof screen>;
+
+/** Restore saved workspaces from before the Explore route was renamed. */
+const savedScreen = new t.Type<Screen>("Saved screen", screen.is, (value, context) =>
+  screen.validate(value === "access-review" ? "explore" : value, context), t.identity);
 
 /** A versioned assertion observation with elapsed engine call time. */
 const reportRow = t.intersection([t.type({
@@ -216,7 +223,7 @@ export const workspaceRevision = t.refinement(t.number, (value) => Number.isSafe
 /** Atomically stored workspace. The authored revision distinguishes edits from server checkpoints. */
 export const workspace = t.intersection([t.type({
   revision: workspaceRevision,
-  route: screen, store: t.string, model: t.string, autoSave: t.boolean, autoPublish: t.boolean,
+  route: savedScreen, store: t.string, model: t.string, autoSave: t.boolean, autoPublish: t.boolean,
   drafts: t.record(t.string, draft), batches: t.array(batch),
 }), t.partial({ report, authoredRevision: workspaceRevision, connection: t.string, selections: t.record(t.string, t.string) })]);
 export type Workspace = t.TypeOf<typeof workspace>;
@@ -249,7 +256,12 @@ export const tuplePublicationResult = t.intersection([mutationResult, t.partial(
   tupleProblem: t.type({ phase: t.keyof({ reread: null, write: null }), issue: tupleIssue }),
 })]);
 
-export const storesResponse = t.type({ stores: t.array(t.type({ id: engineId, name: nonempty })) });
+/** Names accepted by the OpenFGA CreateStore API. */
+export const storeName = t.refinement(nonempty, (value) => /^[A-Za-z0-9\t\n\f\r ./^_&@-]{3,64}$/.test(value), "OpenFGA store name");
+export const storeInfo = t.type({ id: engineId, name: nonempty });
+export type StoreInfo = t.TypeOf<typeof storeInfo>;
+export const storesResponse = t.type({ stores: t.array(storeInfo) });
+export const storeDeletion = t.type({ deleted: t.literal(true) });
 export const modelsResponse = t.type({ authorization_models: t.array(installedModel) });
 
 /** Original query response, separately from later evidence and with a dispatch timestamp. */
@@ -263,9 +275,13 @@ const supportingTuple = t.intersection([observedTuple, t.type({
   role: t.keyof({ grant: null, group: null, parent: null, required: null, blocking: null }),
 })]);
 export type SupportingTuple = t.TypeOf<typeof supportingTuple>;
+const observedModelRule = t.intersection([
+  t.type({ name: nonempty, expression: t.string }),
+  t.partial({ type: nonempty, line: modelSourceLine }),
+]);
 
 export const evidenceResult = t.intersection([t.type({
-  reason: t.string, rules: t.array(t.string), tuples: t.array(observedTuple), checks: t.array(t.type({ user: t.string, relation: t.string, object: t.string, allowed: t.boolean, observedAt: t.number })),
+  reason: t.string, rules: t.array(observedModelRule), tuples: t.array(observedTuple), checks: t.array(t.type({ user: t.string, relation: t.string, object: t.string, allowed: t.boolean, observedAt: t.number })),
   expansion: t.union([expansionTree, t.null]), elapsed: t.number,
 }), t.partial({ failure, checkReason: t.string, supporting: t.array(supportingTuple) })]);
 

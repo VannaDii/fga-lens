@@ -1,7 +1,7 @@
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 import { isSeq, parseDocument } from "yaml";
 
-import { fetchInstances, openTarget, policyFixture, setDraft } from "./finding-helpers";
+import { baseDsl, fetchInstances, openTarget, policyFixture, routeGrant, setDraft, writeEngine } from "./finding-helpers";
 
 const workshop = "workspace:workshop";
 const project = "project:trail";
@@ -105,6 +105,43 @@ test("Instances control fetches the synthetic hierarchy and can select a known i
   await focusPicker(page).selectOption(project);
   await expect(focusPicker(page)).toHaveValue(project);
   await expect(editor).toHaveValue(/document:reference/);
+});
+
+test("tuple editor detects JSON and both YAML styles without changing the authored text", async ({ page, request }) => {
+  const target = await policyFixture(request, "Tuple editor formats", baseDsl, [routeGrant]);
+  await setDraft(request, target, { yaml: "[]\n", baseline: [] }, { autoSave: true, autoPublish: false });
+  await openTarget(page, target, "instances");
+  const yaml = page.getByRole("textbox", { name: "Tuple YAML", exact: true });
+  const json = page.getByRole("textbox", { name: "Tuple JSON", exact: true });
+  const source = page.locator(".wb-tuple-editor");
+  const highlight = source.locator(".editor-highlight");
+
+  await expect(source.getByText("tuples.yaml", { exact: true })).toBeVisible();
+  await yaml.fill("[{ user: group:team#member, relation: viewer, object: document:example }] # YAML");
+  await expect(source.getByText("tuples.yaml", { exact: true })).toBeVisible();
+  await expect(highlight.locator(".syntax-keyword")).toHaveText(["user", "relation", "object"]);
+  await expect(highlight.locator(".syntax-comment")).toHaveText("# YAML");
+
+  const text = JSON.stringify([routeGrant], null, 2);
+  await yaml.fill(text);
+  await expect(source.getByText("tuples.json", { exact: true })).toBeVisible();
+  await expect(json).toBeFocused();
+  await expect(json).toHaveValue(text);
+  await expect(highlight.locator(".syntax-keyword")).toHaveText(['"user"', '"relation"', '"object"']);
+  await expect(highlight.locator(".syntax-string")).toHaveText(['"user:maya"', '"viewer"', '"document:example"']);
+  expect((await highlight.locator("code").allTextContents()).join("\n")).toBe(text);
+
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  const added = { ...routeGrant, object: "document:fetched" };
+  await writeEngine(request, target, { writes: { tuple_keys: [added] } });
+  await fetchInstances(page);
+  await expect(json).toHaveValue(/document:fetched/);
+  expect(JSON.parse(await json.inputValue())).toEqual(expect.arrayContaining([routeGrant, added]));
+
+  await json.fill("# YAML\n- user: user:maya\n  relation: viewer\n  object: document:example");
+  await expect(source.getByText("tuples.yaml", { exact: true })).toBeVisible();
+  await expect(yaml).toBeFocused();
+  await expect(highlight.locator(".syntax-keyword")).toHaveText(["user", "relation", "object"]);
 });
 
 test("Instances groups a resource's parent, focus and separate siblings with their own direct role holders", async ({

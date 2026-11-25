@@ -4,14 +4,18 @@ import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import {
   Background, Controls, Handle, MarkerType, Position, ReactFlow, type Edge, type Node, type NodeProps, type ReactFlowInstance,
 } from "@xyflow/react";
+import { Target } from "lucide-react";
 
 import type { ReviewResource, ReviewScope } from "@/lib/workbench-access-review-contract";
 import { reviewPair } from "@/lib/workbench-access-review-contract";
 
-type ReviewNode = Node<{ content: ReactNode; muted: boolean }, "review">;
+export type ReviewTone = "allowed" | "matches" | "muted";
+type ReviewNode = Node<{ content: ReactNode; tone?: ReviewTone; selected: boolean }, "review">;
 
 function ReviewCard({ data }: NodeProps<ReviewNode>) {
-  return <div className="review-graph-card" data-muted={data.muted || undefined}>
+  return <div className="review-graph-card" data-muted={data.tone === "muted" || undefined}
+    data-allowed={data.tone === "allowed" || undefined} data-matches={data.tone === "matches" || undefined}
+    data-selected={data.selected || undefined}>
     <Handle type="target" position={Position.Top} isConnectable={false} />
     {data.content}
     <Handle type="source" position={Position.Bottom} isConnectable={false} />
@@ -19,28 +23,30 @@ function ReviewCard({ data }: NodeProps<ReviewNode>) {
 }
 
 const nodeTypes = { review: ReviewCard };
-const cardSize = { width: 200, height: 145 };
+const cardWidth = 248;
+const cardHeight = ({ relations }: ReviewResource) => 82 + relations.length * 49;
 // Use the known dimensions even for cards whose content just changed.
 const fitOptions = { padding: 0.13, includeHiddenNodes: true };
 
 /** Give controlled cards stable box and connector geometry while live decisions change their contents. */
-function cardHandles(): ReviewNode["handles"] {
-  const x = (cardSize.width - 1) / 2;
+function cardHandles(height: number): ReviewNode["handles"] {
+  const x = (cardWidth - 1) / 2;
   return [
     { id: null, type: "target", position: Position.Top, x, y: 0 },
-    { id: null, type: "source", position: Position.Bottom, x, y: cardSize.height - 1 },
+    { id: null, type: "source", position: Position.Bottom, x, y: height - 1 },
   ];
 }
 
-function positions(root: string, visible: ReviewResource[]) {
-  const children = Map.groupBy(visible, ({ parent }) => parent);
+function positions(root: string, resources: ReviewResource[]) {
+  const children = Map.groupBy(resources, ({ parent }) => parent);
   const result = new Map<string, { x: number; y: number }>();
-  const order = [...visible].reverse();
-  const indexes = new Map(visible.map(({ object }, index) => [object, index]));
-  let lane = 0;
-  for (const resource of order) {
-    if (!(children.get(resource.object)?.length)) result.set(resource.object, { x: 0, y: resource.depth * (cardSize.height + 43) });
+  const levels = Map.groupBy(resources, ({ depth }) => depth);
+  let y = 0;
+  for (const level of levels.values()) {
+    for (const resource of level) result.set(resource.object, { x: 0, y });
+    y += Math.max(...level.map(cardHeight)) + 58;
   }
+  let lane = 0;
   const walk = [root];
   const traversed: string[] = [];
   while (walk.length) {
@@ -48,29 +54,32 @@ function positions(root: string, visible: ReviewResource[]) {
     traversed.push(object);
     const descendants = children.get(object);
     if (descendants?.length) {
-      walk.push(...[...descendants].sort((a, b) => indexes.get(b.object)! - indexes.get(a.object)!).map((item) => item.object));
+      walk.push(...descendants.toReversed().map((item) => item.object));
     } else {
       const point = result.get(object);
-      if (point) point.x = lane++ * (cardSize.width + 32);
+      if (point) point.x = lane++ * (cardWidth + 40);
     }
   }
   for (const object of traversed.reverse()) {
     const descendants = children.get(object);
     if (!descendants?.length) continue;
     const coordinates = descendants.map(({ object }) => result.get(object)!.x);
-    const depth = visible[indexes.get(object)!].depth;
-    result.set(object, { x: (Math.min(...coordinates) + Math.max(...coordinates)) / 2, y: depth * (cardSize.height + 43) });
+    result.get(object)!.x = (Math.min(...coordinates) + Math.max(...coordinates)) / 2;
   }
   return result;
 }
 
-/** Lay out the visible hierarchy independently of access decisions. */
-export function AccessReviewGraph({ scope, visible, muted, highlighted, render }: {
+/** Lay out the full hierarchy independently of access decisions. */
+export function AccessReviewGraph({ scope, visible, selection, cardTones, branchTones, highlighted, render, select, viewportChanged }: {
   scope: ReviewScope;
   visible: ReviewResource[];
-  muted: Set<string>;
+  selection: { object: string; focusChart: boolean } | undefined;
+  cardTones: Map<string, ReviewTone | undefined>;
+  branchTones: Map<string, ReviewTone | undefined>;
   highlighted: Set<string>;
   render: (resource: ReviewResource) => ReactNode;
+  select: (object: string) => void;
+  viewportChanged: () => void;
 }) {
   const layout = useMemo(() => positions(scope.root, visible), [scope.root, visible]);
   const flow = useRef<ReactFlowInstance<ReviewNode, Edge>>(null);
@@ -78,34 +87,66 @@ export function AccessReviewGraph({ scope, visible, muted, highlighted, render }
     const frame = requestAnimationFrame(() => { void flow.current?.fitView(fitOptions); });
     return () => cancelAnimationFrame(frame);
   }, [layout]);
-  const nodes: ReviewNode[] = visible.map((resource) => ({
-    id: resource.object, type: "review", position: layout.get(resource.object)!,
-    data: { content: render(resource), muted: muted.has(resource.object) },
-    ...cardSize, handles: cardHandles(), draggable: false, selectable: false,
-  }));
+  useEffect(() => {
+    if (!selection?.focusChart) return;
+    const frame = requestAnimationFrame(() => {
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      void flow.current?.fitView({ ...fitOptions, nodes: [{ id: selection.object }], maxZoom: 1,
+        duration: reduceMotion ? 0 : 320, interpolate: "linear" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [selection]);
+  const nodes: ReviewNode[] = visible.map((resource) => {
+    const size = { width: cardWidth, height: cardHeight(resource) };
+    return {
+      id: resource.object, type: "review", position: layout.get(resource.object)!,
+      data: { content: render(resource), tone: cardTones.get(resource.object),
+        selected: selection?.object === resource.object },
+      // Preserve the fixed dimensions when a live result replaces the node data.
+      ...size, measured: size, handles: cardHandles(size.height), draggable: false, selectable: false,
+    };
+  });
   const parents = useMemo(() => new Map(scope.resources.map(({ object, parent }) => [object, parent])), [scope]);
-  const edgeIndex = new Map<string, Edge>();
-  for (const edge of scope.edges) {
-    if (edge.parent === edge.child || !layout.has(edge.parent) || !layout.has(edge.child)) continue;
-    const id = reviewPair(edge.parent, edge.child);
-    const onPath = highlighted.has(JSON.stringify([edge.subject, edge.relation, edge.object]));
-    if (edgeIndex.has(id) && !onPath) continue;
-    const primary = parents.get(edge.child) === edge.parent;
-    const color = onPath ? "var(--green)" : muted.has(edge.child) ? "var(--line-strong)" : "var(--subtle)";
-    edgeIndex.set(id, { id, source: edge.parent, target: edge.child, type: "smoothstep",
+  const links = useMemo(() => Map.groupBy(scope.edges.filter(({ parent, child }) =>
+    parent !== child && layout.has(parent) && layout.has(child)), ({ parent, child }) => reviewPair(parent, child)), [scope.edges, layout]);
+  const edges: Edge[] = [...links].map(([id, group]) => {
+    const { parent, child } = group[0];
+    const onPath = group.some((edge) => highlighted.has(JSON.stringify([edge.subject, edge.relation, edge.object])));
+    const primary = parents.get(child) === parent;
+    const tone = branchTones.get(child);
+    const color = onPath || tone === "allowed" ? "var(--green)" : tone === "matches" ? "var(--blue)"
+      : tone === "muted" ? "var(--line-strong)" : "var(--subtle)";
+    return { id, source: parent, target: child, type: "smoothstep",
+      label: [...new Set(group.map(({ relation }) => relation))].sort().join(" · "),
+      labelStyle: { fill: "var(--ink)", fontSize: 12 },
+      labelBgStyle: { fill: "var(--paper)" },
       markerEnd: { type: MarkerType.ArrowClosed, color }, style: {
         stroke: color, strokeWidth: onPath ? 3 : 1.4, ...(primary ? {} : { strokeDasharray: "4 4" }),
       }, zIndex: onPath ? 1 : 0,
-    });
-  }
+    };
+  });
 
-  return <div className="review-graph">
-    <ReactFlow nodes={nodes} edges={[...edgeIndex.values()]} nodeTypes={nodeTypes}
-      onInit={(instance) => { flow.current = instance; }} fitView fitViewOptions={fitOptions}
-      nodesConnectable={false} nodesDraggable={false} elementsSelectable={false} minZoom={0.15} maxZoom={1.9}
-      proOptions={{ hideAttribution: false }}>
-      <Background color="var(--line-strong)" gap={20} />
-      <Controls showInteractive={false} fitViewOptions={fitOptions} />
-    </ReactFlow>
-  </div>;
+  return <>
+    <header className="wb-pane-heading">
+      <div className="wb-heading-label"><h2>Access chart</h2>
+        <button type="button" className="wb-icon-button review-recenter" aria-label="Recenter chart" title="Recenter chart"
+          onClick={() => { void flow.current?.fitView(fitOptions); }}>
+          <Target size={15} aria-hidden="true" />
+        </button>
+      </div>
+    </header>
+    <div className="review-graph">
+      <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes}
+        onInit={(instance) => { flow.current = instance; }} fitView fitViewOptions={fitOptions}
+        onNodeClick={(event, node) => {
+          if (event.target instanceof Element && !event.target.closest("button")) select(node.id);
+        }}
+        onMove={viewportChanged}
+        nodesConnectable={false} nodesDraggable={false} nodesFocusable={false} elementsSelectable={false} minZoom={0.02} maxZoom={1.9}
+        proOptions={{ hideAttribution: false }}>
+        <Background color="var(--line-strong)" gap={20} />
+        <Controls showInteractive={false} fitViewOptions={fitOptions} />
+      </ReactFlow>
+    </div>
+  </>;
 }

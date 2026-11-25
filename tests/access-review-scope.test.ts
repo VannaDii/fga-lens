@@ -68,7 +68,8 @@ test("AR01 catalog collects exact concrete identities from every page and omits 
   const catalog = await response.json();
   expect(catalog.target).toEqual(target);
   expect([...catalog.objects].sort()).toEqual(selectorObjects);
-  expect(catalog.links).toEqual(expect.arrayContaining([...parentLinks, inverseLink].map((link) => expect.objectContaining(link))));
+  expect(catalog.links).toHaveLength(parentLinks.length + 1);
+  expect(catalog.links).toEqual(expect.arrayContaining([...parentLinks, inverseLink]));
   expect(JSON.stringify(catalog)).toContain("allowed_region");
   expect(JSON.stringify(catalog)).toContain("TYPE_NAME_STRING");
   expect(JSON.stringify(catalog)).not.toContain(storedMarker);
@@ -133,6 +134,17 @@ test.each(scopeCases)("AR01 scope $name", async ({ inputs, mock, expect: evaluat
   const transport = mock();
   const result = await discover({ action: "access-review-scope", root: inputs.root, links: inputs.links });
   await evaluate(inputs, transport, result);
+});
+
+test("automatic scope follows inheritance through a custom relation and explicit child links", async () => {
+  const model = reviewModel.replace("type campaign\n  relations\n    define parent:", "type campaign\n  relations\n    define division:")
+    .replace("define can_view: can_view from parent\n    define publish:", "define can_view: can_view from division\n    define publish:")
+    .replace("define include: [division]", "define include: [division]\n    define can_view_children: can_view from include");
+  const records = allTuples.map((tuple) => tuple.object.startsWith("campaign:") && tuple.relation === "parent"
+    ? { ...tuple, relation: "division" } : tuple);
+  const transport = fixtureTransport(model, tuplePage(records));
+  const response = await discover({ action: "access-review-scope", root: tide });
+  await assertScope({ root: tide, expected: [...scopeObjects, inverse].sort() }, transport, response);
 });
 
 test("AR01 server rejects a relation that does not connect the declared object and subject types", async () => {

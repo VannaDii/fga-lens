@@ -1,7 +1,9 @@
+import type { TypeOf } from "io-ts";
+
 import {
-  reviewCheckObject, reviewLinkKey, type ReviewCatalog, type ReviewEdge, type ReviewLink, type ReviewResource, type ReviewScope,
+  reviewLinkKey, type ReviewCatalog, type ReviewEdge, type ReviewLink, type ReviewResource, type ReviewScope,
 } from "./workbench-access-review-contract";
-import { tupleKey, type ModelContent, type Target, type Tuple } from "./workbench-contract";
+import { tupleKey, type rewrite, type ModelContent, type Target, type Tuple } from "./workbench-contract";
 import { OperationFailure } from "./workbench-errors";
 import { parameters, tupleFitsModel, tupleObject, tupleSubject } from "./workbench-models";
 import { readModel, readTuples } from "./workbench-server";
@@ -33,6 +35,28 @@ function linkOptions(model: ModelContent) {
   return choices;
 }
 
+function collectTuplesets(rule: TypeOf<typeof rewrite>, relations: Set<string>) {
+  if (rule.tupleToUserset) relations.add(rule.tupleToUserset.tupleset.relation);
+  for (const child of rule.union?.child ?? rule.intersection?.child ?? []) collectTuplesets(child, relations);
+  if (rule.difference) {
+    collectTuplesets(rule.difference.base, relations);
+    collectTuplesets(rule.difference.subtract, relations);
+  }
+}
+
+/** Use the model's inheritance paths and explicit parent/child links to discover descendants. */
+function hierarchyLinks(model: ModelContent, options = linkOptions(model)) {
+  const inheritance = new Map(model.type_definitions.map(({ type, relations }) => {
+    const tuplesets = new Set<string>();
+    for (const rule of Object.values(relations ?? {})) collectTuplesets(rule, tuplesets);
+    return [type, tuplesets];
+  }));
+  return [...options.values()].filter(({ objectType, relation, direction }) => {
+    if (["child", "children", "contains", "include"].includes(relation)) return direction === "object-to-subject";
+    return direction === "subject-to-object" && (relation === "parent" || inheritance.get(objectType)?.has(relation));
+  });
+}
+
 function inventory(records: Tuple[], model: ModelContent) {
   const types = new Set(model.type_definitions.map(({ type }) => type));
   const objects = new Set<string>();
@@ -53,7 +77,7 @@ export function readReviewCatalog(target: Target, signal: AbortSignal): Promise<
       target, objects: [...inventory(records, model)].sort(), types: model.type_definitions.map(({ type }) => type).sort(),
       relations: model.type_definitions.flatMap(({ type, relations }) =>
         Object.keys(relations ?? {}).map((relation) => type + "#" + relation)).sort(),
-      links: [...linkOptions(model).values()], parameters: [...parameters(model).entries()],
+      links: hierarchyLinks(model), parameters: [...parameters(model).entries()],
     };
   });
 }
@@ -79,7 +103,7 @@ function edgesFor(records: Tuple[], links: ReviewLink[], model: ModelContent) {
   return [...edges.values()];
 }
 
-function findResources(root: string, edges: ReviewEdge[], links: ReviewLink[], model: ModelContent) {
+function findResources(root: string, edges: ReviewEdge[], model: ModelContent) {
   const outgoing = Map.groupBy(edges, (edge) => edge.parent);
   const incoming = Map.groupBy(edges, (edge) => edge.child);
   const depths = new Map<string, number>([[root, 0]]);
@@ -94,26 +118,26 @@ function findResources(root: string, edges: ReviewEdge[], links: ReviewLink[], m
     }
   }
   const relationIndex = new Map(model.type_definitions.map(({ type, relations }) => [
-    type, Object.keys(relations ?? {}).filter((relation) =>
-      !links.some((link) => link.objectType === type && link.relation === relation)).sort(),
+    type, Object.keys(relations ?? {}).sort(),
   ]));
   const resources: ReviewResource[] = queue.map((object) => {
     const depth = depths.get(object)!;
     const parents = (incoming.get(object) ?? []).map((edge) => edge.parent)
       .filter((parent) => depths.get(parent) === depth - 1).sort();
-    return { object, depth, parent: parents[0] ?? null, relations: reviewCheckObject.is(object) ? relationIndex.get(object.split(":")[0]) ?? [] : [] };
+    return { object, depth, parent: parents[0] ?? null, relations: relationIndex.get(object.split(":")[0]) ?? [] };
   });
   return { resources, edges: edges.filter(({ parent, child }) => depths.has(parent) && depths.has(child)) };
 }
 
-export function readReviewScope(target: Target, root: string, links: ReviewLink[], signal: AbortSignal): Promise<ReviewScope> {
+export function readReviewScope(target: Target, root: string, links: ReviewLink[] | undefined, signal: AbortSignal): Promise<ReviewScope> {
   return discover(signal, async (bounded) => {
     const model = await readModel(target, bounded);
     const options = linkOptions(model);
-    if (links.some((link) => !options.has(reviewLinkKey(link)))) throw new OperationFailure("invalid input");
+    if (links?.some((link) => !options.has(reviewLinkKey(link)))) throw new OperationFailure("invalid input");
     const records = await readTuples(target.store, bounded);
     if (!inventory(records, model).has(root)) return { target, root, observedAt: Date.now(), resources: [], edges: [] };
-    const graph = findResources(root, edgesFor(records, links, model), links, model);
+    const selected = links ?? hierarchyLinks(model, options);
+    const graph = findResources(root, edgesFor(records, selected, model), model);
     return { target, root, observedAt: Date.now(), ...graph };
   });
 }

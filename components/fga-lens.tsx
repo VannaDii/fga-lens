@@ -22,6 +22,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 
 import { SourceEditor } from "./source-editor";
+import { highlightModelLine } from "./workbench-source-syntax";
 import { ModelGraphCanvas } from "@/components/model-graph";
 import {
   defaultModel,
@@ -145,23 +146,6 @@ function ExampleModelPicker({
   );
 }
 
-function highlightModelLine(line: string) {
-  return line
-    .split(/(\b(?:model|schema|type|relations|define|or|and|but|not|from|condition|with)\b|[\[\](),:#*])/g)
-    .map((token, index) => {
-      const keyword = /^(model|schema|type|relations|define|or|and|but|not|from|condition|with)$/.test(token);
-      const punctuation = /^[\[\](),:#*]$/.test(token);
-      return (
-        <span
-          className={keyword ? "syntax-keyword" : punctuation ? "syntax-punctuation" : undefined}
-          key={`${token}-${index}`}
-        >
-          {token}
-        </span>
-      );
-    });
-}
-
 /** Render syntax highlighting and link selected rules to the editor. */
 function ModelEditor({
   diagnostics,
@@ -171,6 +155,7 @@ function ModelEditor({
   onSelectRelation,
   selectedLine,
   workspace,
+  readOnly,
   editor,
 }: {
   diagnostics: ModelDiagnostic[];
@@ -180,6 +165,7 @@ function ModelEditor({
   onSelectRelation: (relation: GraphRelation) => void;
   selectedLine?: number;
   workspace: boolean;
+  readOnly: boolean;
   editor: React.RefObject<HTMLTextAreaElement | null>;
 }) {
   const diagnosticLines = new Set(diagnostics.map((diagnostic) => diagnostic.line));
@@ -221,7 +207,7 @@ function ModelEditor({
           <span className={`live-state ${diagnostics.length ? "invalid" : ""}`}>
             <i /> {diagnostics.length ? `${diagnostics.length} ${diagnostics.length === 1 ? "issue" : "issues"}` : "Valid"}
           </span>
-          {isChanged && (
+          {!readOnly && isChanged && (
             <button onClick={() => onChange(defaultModel)} title="Restore the example model">
               <RotateCcw size={11} /> Reset
             </button>
@@ -229,15 +215,15 @@ function ModelEditor({
         </div>
       </div>
 
-      <div className="local-trust-note" role="note">
+      {!readOnly && <div className="local-trust-note" role="note">
         <span className="local-trust-icon"><ShieldCheck size={13} /></span>
         <span>
           <strong>Local processing</strong>
           <small>{workspace ? "Publication sends the saved model to the selected store." : "Model contents are never uploaded."}</small>
         </span>
-      </div>
+      </div>}
 
-      <SourceEditor aria-label="OpenFGA authorization model" ref={editor} value={modelText}
+      <SourceEditor aria-label="OpenFGA authorization model" ref={editor} value={modelText} readOnly={readOnly}
         paintLine={highlightModelLine} selectedLine={selectedLine} diagnosticLines={diagnosticLines}
         onChange={(event) => onChange(event.target.value)}
         onClick={(event) => selectCurrentLine(event.currentTarget)}
@@ -381,9 +367,11 @@ function RelationInspector({ relation, onClose, onSource }: {
 }
 
 /** Render the existing editor and graph with either a file workspace or legacy standalone storage. */
-export function FgaLens({ draft, onDraft, relationId, onRelation, actions }: {
+export function FgaLens({ draft, onDraft, relationId, onRelation, actions, publishedLine }: {
   draft?: { dsl: string; validDsl: string };
   actions?: ReactNode;
+  /** Highlight the definition in a read-only published revision. */
+  publishedLine?: number;
   /** Save the current input and newest valid source independently. */
   onDraft?: (dsl: string, validDsl?: string) => void;
   /** Optional relation selection restored from the file workspace. */
@@ -391,6 +379,7 @@ export function FgaLens({ draft, onDraft, relationId, onRelation, actions }: {
   /** Persist relation selection independently of the DSL editor. */
   onRelation?: (relationId: string) => void;
 } = {}) {
+  const readOnly = publishedLine !== undefined;
   const [modelText, setModelText] = useState(draft?.dsl ?? defaultModel);
   const [parsed, setParsed] = useState(() => draft ? parseAuthorizationModel(draft.dsl) : initialParseResult);
   const [lastValidGraph, setLastValidGraph] = useState(() => draft
@@ -533,19 +522,20 @@ export function FgaLens({ draft, onDraft, relationId, onRelation, actions }: {
       <div className={`studio-workspace ${graphExpanded ? "graph-expanded" : ""}`}>
         <aside className="model-pane">
           <header className="pane-heading">
-            <h1>Authorization model</h1>
-            <ExampleModelPicker modelText={modelText} onSelect={loadSample} />
+            <h1>{readOnly ? "Published authorization model" : "Authorization model"}</h1>
+            {!readOnly && <ExampleModelPicker modelText={modelText} onSelect={loadSample} />}
             {actions}
           </header>
           <ModelEditor
             diagnostics={parsed.diagnostics}
             editor={editor}
             workspace={Boolean(draft)}
+            readOnly={readOnly}
             graph={graph}
             modelText={modelText}
             onChange={updateModel}
             onSelectRelation={selectRelation}
-            selectedLine={parsed.diagnostics[0]?.line ?? selectedRelation?.line}
+            selectedLine={readOnly ? selectedRelation?.line ?? publishedLine : parsed.diagnostics[0]?.line ?? selectedRelation?.line}
           />
         </aside>
 

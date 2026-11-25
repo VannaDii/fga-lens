@@ -7,13 +7,15 @@ import { exportBatch, importBatch } from "@/lib/workbench-batches";
 import { decode, modelsResponse, mutationResult, target as targetCodec, type Batch, type InstalledModel,
   type Target, type Workspace, type WorkspaceView,
 } from "@/lib/workbench-contract";
-import { Dialog, download, failureText, invoke, JobStatus, revisionOptions, Select } from "./workbench-ui";
+import { JsonBlock } from "./workbench-source-syntax";
+import { Dialog, Disclosure, download, failureText, invoke, JobStatus, revisionOptions, Select } from "./workbench-ui";
 
 /** Show the workspace's authored regression batches and isolated fixture targets. */
-export function BatchScreen({ state, target, stores, endpoint, remember, add, savedRevision, trackCheckpoint, apply }: {
+export function BatchScreen({ state, target, stores, endpoint, remember, add, savedRevision, trackCheckpoint, apply, refreshStores }: {
   state: Workspace; target: Target; stores: Array<{ id: string; name: string }>; endpoint: string;
   remember: (value: Record<string, string>) => void; add: (batch: Batch) => Promise<void>;
   savedRevision: () => Promise<number>; apply: (receipt: WorkspaceView) => void;
+  refreshStores: () => Promise<void>;
   /** Register the request through receipt application so overlapping preference saves can retry. */
   trackCheckpoint: <A>(operation: Promise<A>) => Promise<A>;
 }) {
@@ -23,7 +25,8 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
   const storeKey = "batch-source-store/" + endpoint + "/" + active?.id;
   const modelKey = "batch-source-model/" + endpoint + "/" + active?.id;
   const selectionKey = "batch-cases/" + active?.id;
-  const store = state.selections?.[storeKey] ?? known?.store ?? target.store;
+  const chosenStore = state.selections?.[storeKey] ?? known?.store ?? target.store;
+  const store = stores.some((entry) => entry.id === chosenStore) ? chosenStore : "";
   const revision = state.selections?.[modelKey] ?? known?.revision ?? (store === target.store ? target.revision : "");
   const [models, setModels] = useState<{ store: string; rows: InstalledModel[] }>({ store: "", rows: [] });
   const [suggestion, setSuggestion] = useState<{ batchId: string; target: Target } | null>(null);
@@ -37,7 +40,8 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
   const selected = chooseCases(state.selections?.[selectionKey], active);
   const installed = modelRows.some((model) => model.id === revision);
   const fixture = installation?.fixture;
-  const staged = fixture && known?.store === store && known.revision === revision && installed;
+  const staged = fixture && stores.some(({ id }) => id === fixture.store)
+    && known?.store === store && known.revision === revision && installed;
   const report = active?.id === state.report?.batchId && endpoint === state.report?.connection ? state.report : undefined;
   const rows = report?.rows ?? [];
   const focusedBatch = active?.id;
@@ -88,6 +92,7 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
           return receipt;
         }));
       if (receipt.failure) setMessage("Publish fixture · " + failureText(receipt.failure) + " · Publish fixture again");
+      else if (kind === "fixture") await refreshStores().catch(() => undefined);
     } catch (error) {
       const label = kind === "batch" ? "Run selected" : "Publish fixture";
       setMessage(label + " · " + (error instanceof Error ? error.message : "server error") + " · Check the installed target and fixture");
@@ -121,7 +126,7 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
       <header className="wb-pane-heading"><h2>{active?.name ?? "Fixture"}</h2>
         <button disabled={!active} onClick={() => { setSplit(false); setExporting(true); }}>Export</button>
       </header>
-      <div className="wb-actions">
+      <div className="wb-actions wb-form-actions">
         <Select label="Source store" value={store} options={stores.map((entry) => ({ value: entry.id, label: entry.name }))}
           change={(store) => remember({ [storeKey]: store, [modelKey]: "" })} />
         <Select label="Source model revision" value={revision} options={revisionOptions(modelRows)} title={revision || undefined}
@@ -154,8 +159,9 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
           <div className="wb-table"><table><thead><tr><th>Case</th><th>Operation</th><th>Expected</th><th>Actual</th><th>Result</th><th>Time</th></tr></thead>
             <tbody>{rows.map((row, index) => <tr key={index}><td>Case {row.caseIndex + 1} · {row.name}</td>
               <td>{row.operation}{row.input && " · " + row.input.relation}
-                {row.input && <details><summary>Assertion {(row.assertionIndex ?? 0) + 1} request</summary>
-                  <pre>{JSON.stringify(row.input, null, 2)}</pre></details>}
+                {row.input && <Disclosure title={"Assertion " + ((row.assertionIndex ?? 0) + 1) + " request"}>
+                  <JsonBlock value={row.input} />
+                </Disclosure>}
               </td>
               <td>{JSON.stringify(row.expected)}</td><td>{row.actual === null ? "—" : JSON.stringify(row.actual)}</td>
               <td>{row.status}{row.failure && " · " + failureText(row.failure)}</td><td>{row.elapsed.toFixed(1)} ms</td></tr>)}</tbody></table></div></>}

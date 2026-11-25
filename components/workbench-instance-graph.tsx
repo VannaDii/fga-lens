@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import { tupleKey, type Tuple } from "@/lib/workbench-contract";
+import { Disclosure } from "./workbench-ui";
 
 /** A concrete instance's direct links, with the original tuple data intact. */
 type InstanceLinks = { incoming: Tuple[]; outgoing: Tuple[] };
@@ -240,8 +241,7 @@ export function DirectTuples({ records, links, inspect }: {
   records: Tuple[]; links?: InstanceLinks; inspect: Inspect;
 }) {
   const direct = links ? [...links.incoming, ...links.outgoing.filter((tuple) => tuple.object !== subjectObject(tuple))] : records;
-  return <details className="wb-instance-tuples">
-    <summary>Inspect direct tuples ({direct.length})</summary>
+  return <Disclosure className="wb-instance-tuples" title={"Inspect direct tuples (" + direct.length + ")"}>
     {direct.length > 0 ? <table>
       <thead><tr><th scope="col">Subject</th><th scope="col">Relation</th><th scope="col">Object</th></tr></thead>
       <tbody>{direct.map((tuple) => <tr key={tupleKey(tuple)}>
@@ -251,5 +251,5 @@ export function DirectTuples({ records, links, inspect }: {
         <td><code>{tuple.object}</code></td>
       </tr>)}</tbody>
     </table> : <p>No direct tuples.</p>}
-  </details>;
+  </Disclosure>;
 }

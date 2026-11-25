@@ -1,8 +1,9 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { transformer } from "@openfga/syntax-transformer";
 
 import {
   baseDsl, companionGrant, evidencePanel, gateState, holdAction, openTarget, policyFixture,
-  routeGrant, setDraft, toYaml, writeEngine,
+  routeGrant, setCompare, setDraft, toYaml, writeEngine,
 } from "./finding-helpers";
 import {
   armTransport, capturedRequests, clearTraffic, installFixture, memberThroughParent, postToEngine, storedTuples,
@@ -24,6 +25,7 @@ async function selectCheck(page: Page, user = routeGrant.user, object = routeGra
 }
 
 const run = (page: Page) => page.getByRole("button", { name: "Run", exact: true });
+const resultHeading = (page: Page) => page.getByRole("heading", { name: "Result", exact: true }).locator("..");
 
 /** Set an explicit manually entered condition value through the real form. */
 async function enterCondition(page: Page, value: string) {
@@ -43,7 +45,7 @@ async function regionFixture(page: Page, request: APIRequestContext, name: strin
     { autoSave: false, autoPublish: false, resetSelections: true });
   await openTarget(page, target, "queries");
   await selectCheck(page);
-  await page.getByRole("checkbox", { name: "Compare", exact: true }).uncheck();
+  await setCompare(page, false);
   return target;
 }
 
@@ -58,7 +60,7 @@ test("F07 a deliberately supplied empty string is sent to OpenFGA and allows the
   expect(sent).toEqual({
     authorization_model_id: target.revision, tuple_key: routeGrant, context: { region: "" },
   });
-  await expect(page.getByText("Allowed", { exact: true })).toBeVisible();
+  await expect(resultHeading(page).getByText("Allowed", { exact: true })).toBeVisible();
 });
 
 test("F07 a typed prefix-like string stays editable and reaches the actual wire unmodified", async ({ page, request }) => {
@@ -70,7 +72,7 @@ test("F07 a typed prefix-like string stays editable and reaches the actual wire 
   await run(page).click();
   await expect.poll(() => capturedRequests(request, target.path + "/check"), { timeout: 2500 })
     .toContainEqual({ authorization_model_id: target.revision, tuple_key: routeGrant, context: { region: syntheticContext } });
-  await expect(page.getByText("Allowed", { exact: true })).toBeVisible();
+  await expect(resultHeading(page).getByText("Allowed", { exact: true })).toBeVisible();
 });
 
 test("F07 removing a represented condition value clears the selection before the next Check", async ({ page, request }) => {
@@ -84,29 +86,45 @@ test("F07 removing a represented condition value clears the selection before the
   await editor.fill(toYaml([routeGrant]));
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("Saved to workspace", { exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "Queries", exact: true }).click();
+  await page.getByRole("link", { name: "Query", exact: true }).click();
   await selectCheck(page);
   await clearTraffic(request);
   await run(page).click();
-  await expect(page.getByText("Allowed", { exact: true })).toBeVisible();
+  await expect(resultHeading(page).getByText("Allowed", { exact: true })).toBeVisible();
   const [sent] = await capturedRequests(request, target.path + "/check");
   expect(sent).toMatchObject({ authorization_model_id: target.revision, tuple_key: routeGrant });
   expect(sent.context ?? {}).not.toHaveProperty("region");
 });
 
-test("F07 request disclosure shows the exact captured method, store path, revision and body", async ({ page, request }) => {
+test("F07 result identifies the target and discloses the exact timed request and response", async ({ page, request }) => {
   const target = await regionFixture(page, request, "Exact transmitted request disclosure", [routeGrant]);
   await enterCondition(page, "west");
   await clearTraffic(request);
   await run(page).click();
-  await expect(page.getByText("Allowed", { exact: true })).toBeVisible();
+  await expect(resultHeading(page).getByText("Allowed", { exact: true })).toBeVisible();
+  const result = page.getByRole("article");
+  await expect(result.locator("dt").filter({ hasText: /^Store ID$/ }).locator("xpath=following-sibling::dd")).toHaveText(target.store);
+  await expect(result.locator("dt").filter({ hasText: /^Model revision ID$/ }).locator("xpath=following-sibling::dd")).toHaveText(target.revision);
   const [sent] = await capturedRequests(request, target.path + "/check");
   expect(sent).toEqual({ authorization_model_id: target.revision, tuple_key: routeGrant, context: { region: "west" } });
-  await page.getByText("API request", { exact: true }).click();
-  const disclosure = page.locator("details[open]").filter({ has: page.getByText("API request", { exact: true }) });
-  await expect.soft(disclosure).toContainText("POST", { timeout: 1500 });
-  await expect.soft(disclosure).toContainText(target.path + "/check", { timeout: 1500 });
-  expect(JSON.parse((await disclosure.locator("pre").textContent()) ?? "{}")).toEqual(sent);
+  const requestHeader = result.getByText("API request", { exact: true }).locator("xpath=ancestor::summary");
+  await expect(requestHeader).toContainText(/Sent .*\d/);
+  await expect(requestHeader.getByText("POST", { exact: true })).toBeVisible();
+  await expect(requestHeader.getByText(target.path + "/check", { exact: true })).toBeVisible();
+  await requestHeader.focus();
+  await page.keyboard.press("Enter");
+  const requestCode = requestHeader.locator("..").locator("pre");
+  expect(JSON.parse((await requestCode.textContent()) ?? "{}")).toEqual(sent);
+  await expect(requestCode.locator(".syntax-keyword").first()).toHaveText('"authorization_model_id"');
+  await expect(requestCode).toHaveCSS("border-radius", "8px");
+
+  const responseHeader = result.getByText("Raw response", { exact: true }).locator("xpath=ancestor::summary");
+  await expect(responseHeader).toContainText(/Received .*\d/);
+  await expect(responseHeader).toContainText(/\d+\.\d ms/);
+  await responseHeader.click();
+  const responseCode = responseHeader.locator("..").locator("pre");
+  await expect(responseCode.locator(".syntax-literal")).toHaveText("true");
+  await expect(responseCode).toHaveCSS("border-radius", "8px");
 });
 
 test("F08 a confirmed conditioned direct branch in a union yields supporting evidence", async ({ page, request }) => {
@@ -116,15 +134,27 @@ test("F08 a confirmed conditioned direct branch in a union yields supporting evi
   await setDraft(request, target, { dsl, validDsl: dsl, yaml: toYaml([conditioned]), baseline: [conditioned] });
   await openTarget(page, target, "queries");
   await selectCheck(page);
-  await page.getByRole("checkbox", { name: "Compare", exact: true }).uncheck();
+  await setCompare(page, false);
   await run(page).click();
-  await expect(page.getByText("Allowed", { exact: true })).toBeVisible();
+  await expect(resultHeading(page).getByText("Allowed", { exact: true })).toBeVisible();
   await expect(run(page)).toBeEnabled();
   await page.getByText("Evidence", { exact: true }).click();
   const article = page.getByRole("article");
   await expect.soft(article.getByText(/^Reason undetermined/)).toHaveCount(0);
-  await expect.soft(evidencePanel(page)).toContainText("region_guard");
-  await expect(evidencePanel(page)).toContainText("user:maya");
+  const panel = evidencePanel(page);
+  await expect(panel.getByRole("heading", { name: "Tuple reads" })).toBeVisible();
+  await expect(panel.getByText("Stored", { exact: true }).first()).toBeVisible();
+  await expect(panel.getByText("Subject", { exact: true }).first()).toBeVisible();
+  await expect(panel.getByText("Relation", { exact: true }).first()).toBeVisible();
+  await expect(panel.getByText("Object", { exact: true }).first()).toBeVisible();
+  await expect(panel.getByText("region_guard", { exact: true }).first()).toBeVisible();
+  await expect(panel.locator("pre").filter({ hasText: /"region"/ }).locator(".syntax-string").first()).toHaveText('"west"');
+  await expect(panel).toContainText("user:maya");
+  const [source] = await Promise.all([page.waitForEvent("popup"),
+    panel.getByRole("link", { name: /^View condition region_guard source, line \d+/ }).click()]);
+  await expect(source).toHaveURL(/\/model\/source\?/);
+  await expect(source.locator(".editor-row.highlighted code")).toHaveText("condition region_guard(region: string) {");
+  await source.close();
 });
 
 test("F08 evidence after an inherited-to-direct change is labeled as later beside the original verdict", async ({ page, request }) => {
@@ -132,20 +162,20 @@ test("F08 evidence after an inherited-to-direct change is labeled as later besid
   await setDraft(request, target, { yaml: toYaml(storedTuples), baseline: storedTuples });
   await openTarget(page, target, "queries");
   await selectCheck(page, "user:maya", "organization:ca", "can_read");
-  await page.getByRole("checkbox", { name: "Compare", exact: true }).uncheck();
+  await setCompare(page, false);
   const evidence = holdAction(page, "evidence", "before dispatch");
   await evidence.ready;
   try {
     await clearTraffic(request);
     await run(page).click();
     await evidence.arrived;
-    await expect(page.getByText("Allowed", { exact: true })).toBeVisible();
+    await expect(resultHeading(page).getByText("Allowed", { exact: true })).toBeVisible();
     expect(await capturedRequests(request, target.path + "/check")).toHaveLength(1);
     const direct = { ...memberThroughParent, object: "organization:ca" };
     await writeEngine(request, target, { deletes: { tuple_keys: [memberThroughParent] }, writes: { tuple_keys: [direct] } });
     evidence.release();
     await expect(run(page)).toBeEnabled();
-    await expect(page.getByText("Allowed", { exact: true })).toBeVisible();
+    await expect(resultHeading(page).getByText("Allowed", { exact: true })).toBeVisible();
     await page.getByText("Evidence", { exact: true }).click();
     await expect(evidencePanel(page).getByText(direct.user, { exact: true }).first()).toBeVisible();
     await expect(page.getByRole("article")).toContainText(
@@ -172,7 +202,7 @@ test("F08 a capped ListObjects result and a later Check of the omitted entry kee
   await page.getByRole("combobox", { name: "View as", exact: true }).selectOption(routeGrant.user);
   await page.getByRole("combobox", { name: "Object type", exact: true }).selectOption("document");
   await page.getByRole("combobox", { name: "Relation", exact: true }).selectOption("viewer");
-  await page.getByRole("checkbox", { name: "Compare", exact: true }).uncheck();
+  await setCompare(page, false);
   await clearTraffic(request);
   await run(page).click();
   const result = page.getByRole("article");
@@ -195,13 +225,69 @@ test("F08 a capped ListObjects result and a later Check of the omitted entry kee
   await expect(panel.getByText("Expand observation", { exact: true })).toBeVisible({ timeout: 1800 });
 });
 
+test("comparison excludes the primary pair and links to the rule in the actual comparison revision", async ({ page, request }) => {
+  const primary = await policyFixture(request, "Same store different revisions", baseDsl, [routeGrant]);
+  const padding = Array.from({ length: 30 }, (_, index) => `type padding_${index}`).join("\n\n");
+  const alternateDsl = baseDsl.replace("type document", `${padding}\n\ntype document`)
+    .replace("define access: viewer or editor", "define access: editor");
+  const { authorization_model_id: alternate } = await postToEngine(request, primary.path + "/authorization-models",
+    transformer.transformDSLToJSONObject(alternateDsl));
+  await setDraft(request, primary, { yaml: toYaml([routeGrant]), baseline: [routeGrant] },
+    { autoSave: false, autoPublish: false, resetSelections: true });
+  await openTarget(page, primary, "queries");
+  await selectCheck(page, routeGrant.user, routeGrant.object, "access");
+  await setCompare(page, true);
+  await page.getByRole("combobox", { name: "Alternate store", exact: true }).selectOption(primary.store);
+  const alternateRevision = page.getByRole("combobox", { name: "Alternate revision", exact: true });
+  await expect(alternateRevision.locator(`option[value="${alternate}"]`)).toHaveText("Version 2");
+  await expect(alternateRevision.locator(`option[value="${primary.revision}"]`)).toHaveCount(0);
+  await alternateRevision.selectOption(alternate);
+  await clearTraffic(request);
+  await run(page).click();
+  await expect(run(page)).toBeEnabled();
+  const comparison = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Comparison", exact: true }) });
+  await comparison.getByText("Evidence", { exact: true }).click();
+  const rule = comparison.getByRole("link", { name: /^View document#access source, line \d+/ });
+  const [source] = await Promise.all([page.waitForEvent("popup"), rule.click()]);
+  await expect(source).toHaveURL(new RegExp(`/model/source\\?.*revision=${alternate}`));
+  await expect(source.getByRole("heading", { name: "Published authorization model", exact: true })).toBeVisible();
+  await expect(source.getByRole("textbox", { name: "OpenFGA authorization model" })).toHaveAttribute("readonly", "");
+  const line = source.locator(".editor-row.highlighted");
+  await expect(line.locator("code")).toHaveText("define access: editor");
+  await expect.poll(() => line.evaluate((row) => {
+    const bounds = row.getBoundingClientRect();
+    const viewport = row.closest(".editor-surface")!.getBoundingClientRect();
+    return bounds.top >= viewport.top && bounds.bottom <= viewport.bottom;
+  })).toBe(true);
+  await source.close();
+  await expect(rule).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Model revision", exact: true })).toHaveValue(primary.revision);
+  const checks = await capturedRequests(request, primary.path + "/check");
+  expect(checks.map((check: { authorization_model_id: string }) => check.authorization_model_id).sort())
+    .toEqual([alternate, primary.revision].sort());
+
+  await page.getByRole("combobox", { name: "Model revision", exact: true }).selectOption(alternate);
+  await expect(alternateRevision).toHaveValue("");
+  await expect(alternateRevision.locator(`option[value="${primary.revision}"]`)).toHaveText("Version 1");
+  await clearTraffic(request);
+  await run(page).click();
+  await expect(alternateRevision).toBeFocused();
+  expect(await capturedRequests(request, primary.path + "/check")).toHaveLength(0);
+
+  await setCompare(page, false);
+  await run(page).click();
+  await expect(run(page)).toBeEnabled();
+  await expect(page.getByRole("article")).toHaveCount(1);
+  expect(await capturedRequests(request, primary.path + "/check")).toHaveLength(1);
+});
+
 test("F10 alternate-first compare cannot switch a manually edited expectation source", async ({ page, request }) => {
   const primary = await policyFixture(request, "Primary expectation result", baseDsl, [routeGrant]);
   const alternate = await policyFixture(request, "Alternate expectation result", baseDsl, [routeGrant]);
   await setDraft(request, primary, { yaml: toYaml([routeGrant]), baseline: [routeGrant] });
   await openTarget(page, primary, "queries");
   await selectCheck(page);
-  await page.getByRole("checkbox", { name: "Compare", exact: true }).check();
+  await setCompare(page, true);
   await page.getByRole("combobox", { name: "Alternate store", exact: true }).selectOption(alternate.store);
   await page.getByRole("combobox", { name: "Alternate revision", exact: true }).selectOption(alternate.revision);
   const gate = "compare-primary-reply";
@@ -213,7 +299,9 @@ test("F10 alternate-first compare cannot switch a manually edited expectation so
   try {
     await run(page).click();
     await expect.poll(() => gateState(request)).toContain(gate);
-    await expect(page.getByRole("article").filter({ hasText: alternate.revision }).getByText("Allowed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("article").filter({ hasText: alternate.revision })).toContainText("Comparison");
+    await expect(resultHeading(page).getByText("Comparison", { exact: true }).locator("..")
+      .getByText("Allowed", { exact: true })).toBeVisible();
     const early = await save.isEnabled();
     if (early) {
       await save.click();
@@ -221,7 +309,9 @@ test("F10 alternate-first compare cannot switch a manually edited expectation so
       await dialog.getByRole("combobox", { name: "Expected result", exact: true }).selectOption("false");
     }
     await gateState(request, gate);
-    await expect(page.getByRole("article").filter({ hasText: primary.revision }).getByText("Allowed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("article").filter({ hasText: primary.revision })).toContainText("Primary");
+    await expect(resultHeading(page).getByText("Primary", { exact: true }).locator("..")
+      .getByText("Allowed", { exact: true })).toBeVisible();
     if (early) {
       await expect.soft(source.locator("option:checked")).toContainText(alternate.revision);
       await expect(dialog.getByRole("combobox", { name: "Expected result", exact: true })).toHaveValue("false");
@@ -246,7 +336,7 @@ async function openListComparison(page: Page, request: APIRequestContext, label:
   await setDraft(request, primary, { yaml: toYaml([routeGrant, testOverlay]), baseline: [routeGrant], inventory: [known] },
     { autoSave: false, autoPublish: false, resetSelections: true });
   await openTarget(page, primary, "queries");
-  await page.getByRole("checkbox", { name: "Compare", exact: true }).check();
+  await setCompare(page, true);
   await page.getByRole("combobox", { name: "Alternate store", exact: true }).selectOption(alternate.store);
   await page.getByRole("combobox", { name: "Alternate revision", exact: true }).selectOption(alternate.revision);
   await enterCondition(page, "west");
@@ -279,7 +369,7 @@ async function inspectAlternate(page: Page, request: APIRequestContext, targets:
     await picker.selectOption(entry.id);
     await side.getByRole("button", { name: "Check entry", exact: true }).click();
     const summary = side.getByText("Evidence", { exact: true });
-    if (await summary.locator("..").getAttribute("open") === null) await summary.click();
+    if (await summary.locator("xpath=ancestor::details[1]").getAttribute("open") === null) await summary.click();
     await expect(side.getByText(/Selected-entry Check · .*allowed/i)).toBeVisible();
     expect((await capturedRequests(request, alternate.path + "/check"))[0]).toEqual({
       authorization_model_id: alternate.revision, tuple_key: entry.tuple,
@@ -346,7 +436,7 @@ async function expectDurationCheck(page: Page, request: APIRequestContext,
   await expect.configure({ soft: true }).poll(() => capturedRequests(request, path), { timeout: 1250, message: JSON.stringify(context) })
     .toContainEqual(body);
   if ((await capturedRequests(request, path)).length) {
-    await expect(page.getByRole("article").getByText(allowed ? "Allowed" : "Denied", { exact: true })).toBeVisible();
+    await expect(resultHeading(page).getByText(allowed ? "Allowed" : "Denied", { exact: true })).toBeVisible();
     await expect(run(page)).toBeEnabled();
   }
   expect((await postToEngine(request, path, body)).allowed, "stock OpenFGA accepts this exact duration spelling").toBe(allowed);

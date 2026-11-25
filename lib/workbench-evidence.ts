@@ -58,10 +58,12 @@ export async function explain(
     const { user: subject } = checkInput;
     consume();
     const model = await readModel(target, bounded);
-    const graph = parseAuthorizationModel(modelDsl(model)).graph;
+    const modelSource = modelDsl(model);
+    const sourceLines = modelSource.split("\n");
+    const graph = parseAuthorizationModel(modelSource).graph;
     const overlay = tupleIndex(checkInput.tuples ?? []);
     type Rewrite = NonNullable<(typeof model.type_definitions)[number]["relations"]>[string];
-    const rules = new Set<string>();
+    const rules = new Map<string, Evidence["rules"][number]>();
 
     /** Read each visited relation, applying contextual replacement at the tuple identity. */
     async function tuplesFor(object: string, relation: string) {
@@ -91,15 +93,20 @@ export async function explain(
       if (!rewrite) return uncertain;
       const source = graph?.types.find((entry) => entry.name === definition.type)?.relations
         .find((entry) => entry.name === relation);
-      if (source) rules.add("type " + source.type + " · define " + source.name + ": " + source.expression);
-      result.rules = [...rules];
+      if (source) {
+        const { type, name, expression, line } = source;
+        rules.set(source.id, { type, name, expression,
+          line: sourceLines[line - 1]?.trimStart().startsWith("define " + name + ":") ? line : undefined });
+        result.rules = [...rules.values()];
+      }
       const proof = await walk(rewrite, object, relation, new Set([...visited, token]));
       if (!proof.conditioned) return proof;
       const condition = proof.conditioned.tuple.condition?.name;
       const description = condition ? model.conditions?.[condition] : undefined;
       if (!condition || !description) return uncertain;
-      rules.add("condition " + condition + " { " + description.expression + " }");
-      result.rules = [...rules];
+      const line = sourceLines.findIndex((source) => source.startsWith("condition " + condition + "(")) + 1;
+      rules.set("condition:" + condition, { name: condition, expression: description.expression, line: line || undefined });
+      result.rules = [...rules.values()];
       const decision = await followup({ ...checkInput, object, relation });
       return { decision, chain: proof.chain, reason: decision
         ? "Direct grant satisfies condition " + condition : "Matching grant fails condition " + condition };
