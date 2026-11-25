@@ -3,6 +3,7 @@ import { transformer } from "@openfga/syntax-transformer";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { POST } from "@/app/api/workbench/route";
+import { reviewCatalog } from "@/lib/workbench-access-review-contract";
 import type { Tuple } from "@/lib/workbench-contract";
 import {
   detached, edgeMarker, inverse, inverseLink, oldRevisionLink, parentLinks, remote, reviewModel,
@@ -73,6 +74,16 @@ test("AR01 catalog collects exact concrete identities from every page and omits 
   expect(JSON.stringify(catalog)).not.toContain(storedMarker);
   expect(JSON.stringify(catalog)).not.toContain(edgeMarker);
   expectDiscoveryTraffic(transport, ["", "later-page"]);
+});
+
+test("AR01 keeps a valid long tuple subject selectable", async () => {
+  const longSubject = "user:" + "a".repeat(300);
+  fixtureTransport(reviewModel, tuplePage([{ user: longSubject, relation: "viewer", object: tide }]));
+  const response = await discover({ action: "access-review-catalog" });
+  expect(response.status).toBe(200);
+  const catalog = await response.json();
+  expect(reviewCatalog.is(catalog)).toBe(true);
+  expect(catalog.objects).toEqual([tide, longSubject]);
 });
 
 const scopeCases = [

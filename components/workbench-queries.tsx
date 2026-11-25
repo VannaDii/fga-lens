@@ -8,7 +8,7 @@ import {
   type Batch, type ConditionContext, type Draft, type InstalledModel, type Json, type Parameter, type Query, type Target,
 } from "@/lib/workbench-contract";
 import { readYaml, tupleIndex } from "@/lib/workbench-drafts";
-import { inspectableListEntry, invalidContext, parameters } from "@/lib/workbench-models";
+import { contextValue, inspectableListEntry, invalidContext, parameters } from "@/lib/workbench-models";
 import { queryPath, queryRequest } from "@/lib/workbench-query-request";
 import { Dialog, failureText, invoke, JobStatus, Select } from "./workbench-ui";
 
@@ -29,14 +29,6 @@ const operations = [
 function selectedKeys(value: string) {
   try { return decode(t.array(t.string), JSON.parse(value)) ?? []; }
   catch { return []; }
-}
-
-/** Prefer represented context values and parse only the typed value supplied for a declared field. */
-function contextValue(value: string, types: Parameter[]) {
-  if (types.every(({ type_name }) => ["TYPE_NAME_STRING", "TYPE_NAME_TIMESTAMP", "TYPE_NAME_DURATION", "TYPE_NAME_IPADDRESS"].includes(type_name))) {
-    return value;
-  }
-  try { return decode(json, JSON.parse(value)); } catch { return value; }
 }
 
 /** Give a condition field a distinct namespace for its declared types. */

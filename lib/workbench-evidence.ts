@@ -1,7 +1,7 @@
 import type { TypeOf } from "io-ts";
 
 import { parseAuthorizationModel } from "./fga-model";
-import { evidenceResult, type CheckInput, type Query, type Target } from "./workbench-contract";
+import { evidenceResult, type CheckInput, type Query, type SupportingTuple, type Target } from "./workbench-contract";
 import { tupleIndex } from "./workbench-drafts";
 import { diagnose, OperationFailure } from "./workbench-errors";
 import { modelDsl, tupleFitsModel } from "./workbench-models";
@@ -9,13 +9,15 @@ import { expand, readModel, readTuples, runQuery } from "./workbench-server";
 
 type Evidence = TypeOf<typeof evidenceResult>;
 type ObservedTuple = Evidence["tuples"][number];
-type Proof = { decision: boolean | null; chain: ObservedTuple[]; reason?: string; conditioned?: ObservedTuple };
+type ProofEntry = ObservedTuple & { role?: SupportingTuple["role"] };
+type Proof = { decision: boolean | null; chain: ProofEntry[]; reason?: string; conditioned?: ObservedTuple };
 const uncertain: Proof = { decision: null, chain: [] };
 const absent: Proof = { decision: false, chain: [] };
 
 /** Collect evidence independently of the original query, with at most 32 calls or five seconds. */
 export async function explain(
   target: Target, input: Query, observed: boolean | string[], signal: AbortSignal, advance: () => void, selected?: string,
+  support = false,
 ) {
   const started = performance.now();
   const timeout = AbortSignal.timeout(5_000);
@@ -46,7 +48,7 @@ export async function explain(
     let checkInput: CheckInput;
     let verdict: boolean | string[] = observed;
     if (input.operation === "check") {
-      checkInput = input;
+      checkInput = support ? { ...input, consistent: true } : input;
     } else {
       if (!selected) return { ...result, elapsed: performance.now() - started };
       checkInput = { ...input, operation: "check", user: input.operation === "list-objects" ? input.user : selected,
@@ -119,7 +121,7 @@ export async function explain(
           const [memberObject, memberRelation] = user.split("#");
           const member = await relationProof(memberObject, memberRelation, visited);
           if (member.decision === true) {
-            return { decision: true, chain: [keep(entry), ...member.chain], reason: "Inherited grant" };
+            return { decision: true, chain: [{ ...keep(entry), role: "group" }, ...member.chain], reason: "Inherited grant" };
           }
           incomplete ||= member.decision === null;
         }
@@ -137,7 +139,7 @@ export async function explain(
         keep(link);
         if (link.tuple.condition) { incomplete = true; continue; }
         const child = await relationProof(link.tuple.user, rule.computedUserset.relation, visited);
-        if (child.decision === true) return { decision: true, chain: [link, ...child.chain], reason: "Inherited grant" };
+        if (child.decision === true) return { decision: true, chain: [{ ...link, role: "parent" }, ...child.chain], reason: "Inherited grant" };
         incomplete ||= child.decision === null;
       }
       return incomplete ? uncertain : absent;
@@ -152,10 +154,12 @@ export async function explain(
         const grant = await walk(rule.difference.base, object, relation, visited);
         const block = await walk(rule.difference.subtract, object, relation, visited);
         const chain = [...grant.chain, ...block.chain];
-        if (grant.decision === false) return { decision: false, chain,
+        if (grant.decision === false) return { decision: false, chain: support ? grant.chain : chain,
           reason: grant.reason ?? (block.decision ? "No qualifying grant. A matching block is also present." : "No qualifying grant") };
         if (grant.decision === true && block.decision === true) {
-          return { decision: false, chain, reason: "Grant excluded by a matching block" };
+          return { decision: false, chain: [
+            ...grant.chain, ...block.chain.map((entry) => ({ ...entry, role: "blocking" as const })),
+          ], reason: "Grant excluded by a matching block" };
         }
         if (block.decision === false) return grant;
         return { ...uncertain, chain };
@@ -171,11 +175,13 @@ export async function explain(
       }
       const unresolved = proofs.filter((proof) => proof.decision === null);
       if (union && unresolved.length === 1 && unresolved[0].conditioned) return unresolved[0];
-      return { decision: unresolved.length ? null : !union, chain: proofs.flatMap((proof) => proof.chain) };
+      const chain = proofs.flatMap((proof) => proof.chain);
+      return { decision: unresolved.length ? null : !union, chain: !union && !unresolved.length
+        ? chain.map((entry) => ({ ...entry, role: entry.role ?? "required" })) : chain };
     }
 
     const proof = await relationProof(checkInput.object, checkInput.relation, new Set());
-    result.tuples = proof.chain;
+    result.tuples = proof.chain.map(({ tuple, source, observedAt }) => ({ tuple, source, observedAt }));
     let reason = proof.decision === verdict
       ? proof.reason ?? (verdict ? "Grant supported by the displayed tuple chain" : "No qualifying grant")
       : "Reason undetermined";
@@ -190,6 +196,15 @@ export async function explain(
     }
     consume();
     result.expansion = await expand(target, checkInput.object, checkInput.relation, bounded, checkInput.tuples ?? []);
+    if (support && !selectedCheck) {
+      const rechecked = await followup(checkInput);
+      if (rechecked !== verdict) reason = "Reason undetermined";
+      if (reason !== "Reason undetermined") {
+        const chain = reason.startsWith("No qualifying grant")
+          ? [] : proof.chain;
+        result.supporting = chain.map((entry) => ({ ...entry, role: entry.role ?? "grant" }));
+      }
+    }
     if (selectedCheck) result.checkReason = reason;
     else result.reason = reason;
   } catch (error) {

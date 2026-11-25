@@ -7,6 +7,7 @@ import { flushSync } from "react-dom";
 import * as t from "io-ts";
 
 import { FgaLens, LogoMark } from "./fga-lens";
+import { AccessReviewScreen } from "./workbench-access-review";
 import { QueryScreen } from "./workbench-queries";
 import { BatchScreen } from "./workbench-batches";
 import { InstancesScreen, type InstanceDialogHandle, type TuplePublishCounts } from "./workbench-instances";
@@ -21,7 +22,7 @@ import {
   emptyDraft, inspectTupleDraft, mergeFetched, publicationConflicts, readYaml, resolveTupleSource, tupleDraftIssue, tupleIndex,
 } from "@/lib/workbench-drafts";
 
-const screens = { model: "Model", instances: "Instances", queries: "Queries", batches: "Batches" };
+const screens = { model: "Model", instances: "Instances", queries: "Queries", "access-review": "Access Review", batches: "Batches" };
 type Editor = "model" | "instances";
 
 /** Identify the editor snapshot that can receive a diagnostic source jump. */
@@ -138,6 +139,7 @@ export function Workbench({ children }: { children: ReactNode }) {
   const tupleNotice = editorNotices["instances/" + key] ?? "";
   const tuplePublication = tuplePublications[key];
   const target: Target = { store, revision: state.model };
+  const reviewKey = "access-review/" + JSON.stringify([endpoint, store, target.revision]);
   const model = revisions.find((entry) => entry.id === target.revision);
 
   /** Provide scoped feedback and keep rejected editor data in the local view. */
@@ -414,6 +416,7 @@ export function Workbench({ children }: { children: ReactNode }) {
 
   /** Restore the independent draft and model selection when switching stores. */
   function selectStore(next: string) {
+    if (next === store) return;
     setRevisions([]);
     const capturedKey = keyFor(next);
     remember((prior) => {
@@ -603,6 +606,8 @@ export function Workbench({ children }: { children: ReactNode }) {
         return persist(update).then(() => change(update));
       },
     }} />}
+    {active === "access-review" && <AccessReviewScreen key={reviewKey} target={target}
+      preferenceKey={reviewKey} saved={state.selections?.[reviewKey]} remember={rememberKeys} />}
     {active === "batches" && <BatchScreen state={state} target={target} stores={storeList} endpoint={endpoint}
       remember={rememberKeys}
       add={async (batch) => {

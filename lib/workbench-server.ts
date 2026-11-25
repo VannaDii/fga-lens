@@ -1,13 +1,17 @@
 import * as t from "io-ts";
 
 import {
+  providerReviewResponse, providerReviewRow, type ReviewCheckCommand, type ReviewOutcome,
+} from "./workbench-access-review-contract";
+
+import {
   checkResponse, decode, engineId, expansionResponse, installedModel, modelsResponse,
   objectsResponse, sameTuple, storedTuple, storesResponse, usersResponse,
   type ConditionContext, type Json, type ModelContent, type Query, type Target, type Tuple,
 } from "./workbench-contract";
 import { tupleIndex } from "./workbench-drafts";
-import { OperationFailure } from "./workbench-errors";
-import { modelFingerprint, parseModelContent } from "./workbench-models";
+import { diagnose, OperationFailure } from "./workbench-errors";
+import { invalidContext, modelFingerprint, parameters, parseModelContent } from "./workbench-models";
 import { queryPath, queryRequest } from "./workbench-query-request";
 
 /** Read endpoint configuration without sending credentials to the browser. */
@@ -165,6 +169,40 @@ export async function readTuples(store: string, signal: AbortSignal, key?: Parti
   });
   return all.flatMap((page) => page.tuples.map(({ key: { condition, ...identity } }) =>
     condition ? { ...identity, condition: { ...condition, context: condition.context ?? undefined } } : identity));
+}
+
+/** Identify only parameter names vouched for by the installed condition definition. */
+function missingReviewContext(message: string, model: ModelContent) {
+  const missing = /failed to evaluate relationship condition: '([A-Za-z0-9_]+)' - tuple '[^']*' is missing context parameters '\[([A-Za-z0-9_ ]+)\]'/.exec(message);
+  if (!missing || !Object.hasOwn(model.conditions ?? {}, missing[1])) return undefined;
+  const declared = model.conditions?.[missing[1]].parameters ?? {};
+  const names = missing[2].trim().split(/\s+/).filter(Boolean);
+  return names.length && names.every((name) => Object.hasOwn(declared, name)) ? [...new Set(names)].sort() : undefined;
+}
+
+/** Send one bounded batch, preserving good siblings when a provider returns an invalid item. */
+export async function runReviewChecks(input: ReviewCheckCommand, signal: AbortSignal) {
+  const { target, subject, context, checks } = input;
+  const started = performance.now();
+  const model = await readModel(target, signal);
+  const types = new Map(model.type_definitions.map((definition) => [definition.type, definition]));
+  if (invalidContext(context, parameters(model)) || !types.has(subject.split(":")[0])
+    || checks.some(({ object, relation }) => !Object.hasOwn(types.get(object.split(":")[0])?.relations ?? {}, relation))) {
+    throw new OperationFailure("invalid input");
+  }
+  const reply = await upstream("/stores/" + id(target.store) + "/batch-check", providerReviewResponse, signal, {
+    authorization_model_id: id(target.revision), consistency: "HIGHER_CONSISTENCY",
+    checks: checks.map(({ id, object, relation }) => ({ correlation_id: id, tuple_key: { user: subject, relation, object }, context })),
+  });
+  const observedAt = Date.now();
+  const results: ReviewOutcome[] = checks.map(({ id }) => {
+    const row = Object.hasOwn(reply.result, id) ? decode(providerReviewRow, reply.result[id]) : null;
+    if (typeof row?.allowed === "boolean") return { id, allowed: row.allowed };
+    const missing = row?.error && missingReviewContext(row.error.message, model);
+    const failure = diagnose(new OperationFailure(missing ? "invalid input" : "server error"), started);
+    return missing ? { id, failure, missing } : { id, failure };
+  });
+  return { results, observedAt };
 }
 
 /** Execute the captured operation and preserve its original result and elapsed time. */

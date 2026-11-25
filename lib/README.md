@@ -12,6 +12,8 @@ Publish failures attach application reason codes, source coordinates, and allowe
 
 Both startup modes check the [OpenFGA v1.22.1 default][write-context-limit] of 32 KiB per added tuple's protobuf condition context before any tuple mutation. The [Write command][write-context-check] checks this size separately from Expand's model validation. Deletions send tuple keys only.
 
+Access Review [discovers scope](workbench-access-review-scope.ts) from published tuple pages and typed links in the installed revision. Its [codecs](workbench-access-review-contract.ts) decode the catalog, scope, and each BatchCheck row. The adapter sends at most 25 checks per request with higher consistency and returns safe diagnostics for failed items. Evidence reuses Check, Read and Expand with a bounded confirmation step.
+
 [expand]: https://github.com/openfga/openfga/blob/v1.22.1/pkg/server/commands/expand.go#L67-L73
 [write-context-limit]: https://github.com/openfga/openfga/blob/v1.22.1/pkg/server/config/config.go#L32-L34
 [write-context-check]: https://github.com/openfga/openfga/blob/v1.22.1/pkg/server/commands/write.go#L136-L154

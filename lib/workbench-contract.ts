@@ -74,7 +74,7 @@ export const rewrite: t.Type<Rewrite> = t.recursion("Relation rewrite", () => t.
 
 /** Parameter definitions can recursively contain list and map element types. */
 export type Parameter = { type_name: string; generic_types?: Parameter[] };
-const parameter: t.Type<Parameter> = t.recursion("Condition parameter", () => t.intersection([
+export const parameter: t.Type<Parameter> = t.recursion("Condition parameter", () => t.intersection([
   t.type({ type_name: nonempty }), t.partial({ generic_types: t.array(parameter) }),
 ]));
 
@@ -197,7 +197,7 @@ export const draft = t.intersection([t.type({
 export type Draft = t.TypeOf<typeof draft>;
 
 /** The named routes that can be restored by the workbench. */
-export const screen = t.keyof({ model: null, instances: null, queries: null, batches: null });
+export const screen = t.keyof({ model: null, instances: null, queries: null, "access-review": null, batches: null });
 export type Screen = t.TypeOf<typeof screen>;
 
 /** A versioned assertion observation with elapsed engine call time. */
@@ -258,12 +258,16 @@ export const queryResult = t.type({
 });
 
 /** Engine observations and their source are retained even for an undetermined reason. */
+const observedTuple = t.type({ tuple, source: t.keyof({ stored: null, contextual: null }), observedAt: t.number });
+const supportingTuple = t.intersection([observedTuple, t.type({
+  role: t.keyof({ grant: null, group: null, parent: null, required: null, blocking: null }),
+})]);
+export type SupportingTuple = t.TypeOf<typeof supportingTuple>;
+
 export const evidenceResult = t.intersection([t.type({
-  reason: t.string, rules: t.array(t.string), tuples: t.array(t.type({
-    tuple, source: t.keyof({ stored: null, contextual: null }), observedAt: t.number,
-  })), checks: t.array(t.type({ user: t.string, relation: t.string, object: t.string, allowed: t.boolean, observedAt: t.number })),
+  reason: t.string, rules: t.array(t.string), tuples: t.array(observedTuple), checks: t.array(t.type({ user: t.string, relation: t.string, object: t.string, allowed: t.boolean, observedAt: t.number })),
   expansion: t.union([expansionTree, t.null]), elapsed: t.number,
-}), t.partial({ failure, checkReason: t.string })]);
+}), t.partial({ failure, checkReason: t.string, supporting: t.array(supportingTuple) })]);
 
 /** Bounded progress exposed by jobs which may be explicitly cancelled. */
 export const progress = t.type({ active: t.boolean, completed: t.number, total: t.union([t.number, t.null]) });

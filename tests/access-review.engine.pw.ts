@@ -312,10 +312,18 @@ test("AR03 distinguishes actual exclusion, missing context, valid context outcom
     const region = page.getByRole("textbox", { name: /^region\b/i });
     await expect(page.getByText(storedMarker, { exact: true })).toHaveCount(0);
     await delay.fill("synthetic-invalid-duration");
+    await expect(delay).toBeFocused();
     await expect(page.getByText(/(?:invalid.*delay|delay.*(?:invalid|required|duration))/i).filter({ visible: true })).toBeVisible();
     expect(await capturedBatches(request, target)).toEqual(batches);
 
     await delay.fill("1s");
+    const emptyRegion = page.getByRole("checkbox", { name: "Send an empty string for region", exact: true });
+    await emptyRegion.check();
+    await expectVerdict(entry, "Review", "Denied");
+    expect(await capturedBatches(request, target)).toEqual(expect.arrayContaining([expect.objectContaining({
+      checks: expect.arrayContaining([expect.objectContaining({ tuple_key: checking, context: { region: "", delay: "1s" } })]),
+    })]));
+    await emptyRegion.uncheck();
     await region.fill(storedMarker);
     const matching = { region: storedMarker, delay: "1s" };
     await expectVerdict(entry, "Review", "Allowed");

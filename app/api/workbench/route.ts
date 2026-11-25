@@ -1,12 +1,14 @@
 import * as t from "io-ts";
 
+import { reviewCatalogCommand, reviewCheckCommand, reviewScopeCommand } from "@/lib/workbench-access-review-contract";
+import { readReviewCatalog, readReviewScope } from "@/lib/workbench-access-review-scope";
 import { decode, engineId, outcome, query, target, workspace, workspaceRevision } from "@/lib/workbench-contract";
 import { explain } from "@/lib/workbench-evidence";
 import { diagnose, OperationFailure, TuplePlanRejection } from "@/lib/workbench-errors";
 import { cancelJob, jobProgress, runJob } from "@/lib/workbench-jobs";
 import { publishSavedModel, publishTuples, resolveTupleConflict, suggestModel } from "@/lib/workbench-publish";
 import { installFixture, runBatch } from "@/lib/workbench-regression";
-import { createStore, models, readTuples, runQuery, stores } from "@/lib/workbench-server";
+import { createStore, models, readTuples, runQuery, runReviewChecks, stores } from "@/lib/workbench-server";
 import { captureWorkspace, checkpoint, downloadRecovery, readWorkspace, saveWorkspace } from "@/lib/workbench-workspace";
 
 /** App commands decode at the server boundary before any workspace or engine access. */
@@ -22,7 +24,10 @@ const command = t.union([
   t.type({ action: t.literal("resolve-tuple"), store: engineId, identity: t.string, useServer: t.boolean, revision }),
   t.type({ action: t.literal("query"), target, input: query }),
   t.intersection([t.type({ action: t.literal("evidence"), target, input: query, outcome, job: t.string }),
-    t.partial({ selected: t.string })]),
+    t.partial({ selected: t.string, mode: t.literal("access-review") })]),
+  reviewCatalogCommand,
+  reviewScopeCommand,
+  reviewCheckCommand,
   t.type({ action: t.literal("suggest-model"), dsl: t.string }),
   t.type({ action: t.literal("fixture"), source: target, batchId: t.string, revision }),
   t.type({ action: t.literal("batch"), batchId: t.string, cases: t.array(t.string), job: t.string, revision }),
@@ -93,7 +98,15 @@ export async function POST(request: Request) {
         return Response.json(await resolveTupleConflict(input.store, input.identity, input.useServer, input.revision));
       case "query": return Response.json(await runQuery(input.target, input.input, signal));
       case "evidence": return Response.json(await runJob(input.job, signal, (job, bounded) =>
-        explain(input.target, input.input, input.outcome, bounded, () => { job.completed += 1; }, input.selected)));
+        explain(input.target, input.input, input.outcome, bounded, () => { job.completed += 1; }, input.selected,
+          input.mode === "access-review")));
+      case "access-review-catalog":
+        return Response.json(await runJob(input.job, signal, (_, bounded) => readReviewCatalog(input.target, bounded)));
+      case "access-review-scope":
+        return Response.json(await runJob(input.job, signal, (_, bounded) =>
+          readReviewScope(input.target, input.root, input.links, bounded)));
+      case "access-review-check":
+        return Response.json(await runReviewChecks(input, signal));
       case "suggest-model": return Response.json(await suggestModel(input.dsl, signal));
       case "fixture": return Response.json(await installFixture(input.batchId, input.source, input.revision, signal));
       case "batch": return Response.json(await runJob(input.job, signal, async (job, bounded) => {

@@ -161,6 +161,14 @@ function conditionValue(value: Json, parameter: Parameter): boolean {
   }
 }
 
+/** Prefer represented context values and parse only the typed value supplied for a declared field. */
+export function contextValue(value: string, types: Parameter[]) {
+  if (types.every(({ type_name }) => ["TYPE_NAME_STRING", "TYPE_NAME_TIMESTAMP", "TYPE_NAME_DURATION", "TYPE_NAME_IPADDRESS"].includes(type_name))) {
+    return value;
+  }
+  try { return decode(json, JSON.parse(value)); } catch { return value; }
+}
+
 /** Return an unsupported or mismatched key without changing the supplied context. */
 export function invalidContext(context: ConditionContext, declared: Map<string, Parameter[]>) {
   return Object.entries(context).find(([name, value]) =>
@@ -172,13 +180,13 @@ const tupleRelationPattern = /^[^:#@ \p{Cc}\p{Cs}]{1,50}$/u;
 const untypedUserPattern = /^[^:# \p{Cc}\p{Cs}]+$/u;
 
 /** Split an OpenFGA object with exactly one type separator. */
-function tupleObject(value: string) {
+export function tupleObject(value: string) {
   const match = tupleObjectPattern.exec(value);
   return match ? { type: match[1], id: match[2] } : null;
 }
 
 /** Decode typed subjects and usersets using the stock tuple delimiter and wildcard rules. */
-function tupleSubject(value: string) {
+export function tupleSubject(value: string) {
   const [object, relation, extra] = value.split("#");
   const identity = tupleObject(object);
   if (!identity || extra !== undefined) return null;
