@@ -55,6 +55,8 @@ test("A21 · workbench navigation retains all destinations and keyboard focus re
   page,
 }) => {
   await openScreen(page, "/model");
+  await expect(page).toHaveTitle("FGA Playground — OpenFGA workbench");
+  await expect(page.getByRole("banner").getByText("FGA Playground", { exact: true })).toBeVisible();
   const model = page.getByRole("link", { name: "Model", exact: true });
   const instances = page.getByRole("link", { name: "Instances", exact: true });
   const queries = page.getByRole("link", { name: "Query", exact: true });

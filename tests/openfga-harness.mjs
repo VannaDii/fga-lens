@@ -16,7 +16,7 @@ for (const port of [enginePort, proxyPort, grpcPort]) {
 const version = spawnSync(binary, ["version"], { encoding: "utf8", timeout: 5000 });
 const versionText = (version.stdout ?? "") + (version.stderr ?? "");
 if (version.status !== 0 || !/\b1\.22\.1\b/.test(versionText)) {
-  throw new Error("FGA Lens integration tests require the installed stock OpenFGA server v1.22.1");
+  throw new Error("FGA Playground integration tests require the installed stock OpenFGA server v1.22.1");
 }
 console.log(versionText.trim());
 

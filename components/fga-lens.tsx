@@ -41,7 +41,7 @@ const initialParseResult = parseAuthorizationModel(defaultModel);
 const modelDraftStorageKey = "fga-lens:model-draft:v1";
 const lastValidModelStorageKey = "fga-lens:last-valid-model:v1";
 
-/** Draw the local FGA Lens mark for the workbench and standalone editor. */
+/** Draw the FGA Playground mark for the workbench and standalone editor. */
 export function LogoMark() {
   return (
     <div className="logo-mark" aria-hidden="true">
@@ -496,7 +496,7 @@ export function FgaLens({ draft, onDraft, relationId, onRelation, actions, publi
   return (
     <div className="studio-shell">
       {!draft && <header className="studio-header">
-        <div className="brand-lockup"><LogoMark /><strong>FGA Lens</strong></div>
+        <div className="brand-lockup"><LogoMark /><strong>FGA Playground</strong></div>
         <div className="document-path" aria-label="Current model">
           <span>model</span><b>/</b><strong>authorization-model.fga</strong>
         </div>
@@ -506,7 +506,7 @@ export function FgaLens({ draft, onDraft, relationId, onRelation, actions, publi
             {parsed.diagnostics.length ? "Model has issues" : "Model valid"}
           </span>
           <a
-            aria-label="View FGA Lens source on GitHub"
+            aria-label="View upstream source on GitHub"
             href="https://github.com/Siddhant-K-code/fga-lens"
             target="_blank"
             rel="noreferrer"

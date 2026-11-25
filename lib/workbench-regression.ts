@@ -24,7 +24,7 @@ export async function installFixture(batchId: string, source: Target, revision: 
       if (error instanceof OperationFailure && error.category === "missing target") return null;
       throw error;
     }) : null;
-    const store = existing?.id ?? (await createStore("FGA Lens regression fixture", signal)).id;
+    const store = existing?.id ?? (await createStore("FGA Playground regression fixture", signal)).id;
 
     /** Bind owned-store and installation changes to the batch and endpoint captured earlier. */
     const record = (fixture?: Target) => checkpoint((state) => ({

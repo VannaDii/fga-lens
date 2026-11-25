@@ -6,7 +6,7 @@ import "./globals.css";
 
 /** Metadata for the model, instance, query and regression screens. */
 export const metadata: Metadata = {
-  title: "FGA Lens — OpenFGA workbench",
+  title: "FGA Playground — OpenFGA workbench",
   description: "Author OpenFGA models, explore relationships and run authorization regressions.",
 };
 

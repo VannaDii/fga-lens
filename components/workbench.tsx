@@ -577,7 +577,7 @@ export function Workbench({ children }: { children: ReactNode }) {
     <header className="wb-header">
       <div className="wb-header-main">
         <div className="wb-header-navigation">
-          <div className="brand-lockup"><LogoMark /><strong>FGA Lens</strong></div>
+          <div className="brand-lockup"><LogoMark /><strong>FGA Playground</strong></div>
           <nav aria-label="Workbench">{Object.entries(screens).map(([path, label]) =>
             <Link key={path} href={"/" + path} aria-current={active === path ? "page" : undefined}>{label}</Link>)}</nav>
         </div>

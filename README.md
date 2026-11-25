@@ -1,6 +1,6 @@
-# FGA Lens
+# FGA Playground
 
-FGA Lens is a local OpenFGA workbench for authoring authorization models, editing tuples, inspecting query evidence, reviewing effective access and running saved regression cases.
+FGA Playground is a local OpenFGA workbench for authoring authorization models, editing tuples, inspecting query evidence, reviewing effective access and running saved regression cases.
 
 ## Run locally
 
