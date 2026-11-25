@@ -1,5 +1,6 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Workbench } from "@/components/workbench";
+import { chromeTint } from "@/lib/workbench-appearance";
 import "@xyflow/react/dist/style.css";
 import "./globals.css";
 
@@ -7,6 +8,14 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "FGA Lens — OpenFGA workbench",
   description: "Author OpenFGA models, explore relationships and run authorization regressions.",
+};
+
+export const viewport: Viewport = {
+  colorScheme: "light dark",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: chromeTint.light },
+    { media: "(prefers-color-scheme: dark)", color: chromeTint.dark },
+  ],
 };
 
 /** Hold the workbench state above route transitions. */

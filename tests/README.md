@@ -68,6 +68,23 @@ The second Copilot repair adds 12 stock-engine cases to the existing focused bro
 
 The isolated inventory is 98 standard runner cases (16 Vitest, 4 Chrome and 78 stock OpenFGA) plus the six C4 scenarios. Full qualification has 114 standard runner cases (32 Vitest, 4 Chrome and 78 stock OpenFGA) plus the same six scenarios, lint and build.
 
+## Access Review
+
+Use the [synthetic Access Review fixture](access-review-fixture.ts) in a disposable workspace. The browser cases install model revisions and tuples in the stock engine. They compare visible decisions to independent ordinary Checks and keep provider traffic local. The Node cases use the real same-origin route and stub only the upstream OpenFGA responses.
+
+| Requirement | Evidence |
+| --- | --- |
+| AR01 · Scope and layout | [Scope cases](access-review-scope.test.ts) check complete pagination, exact concrete IDs, both directions, the installed model, a shared descendant, a cycle and roots with no eligible links. [Browser cases](access-review.engine.pw.ts) check exact check coverage, the live chart and viewport on person switch, branch access and a vanished root. |
+| AR02 · Assignment and inheritance | Browser cases compare the direct and nested group verdicts to stock Checks and look for their exact supporting tuple keys and later-observation label. |
+| AR03 · Denial, context and provider failure | [Wire cases](access-review-wire.test.ts) verify mixed result cardinality, per-ID association and safe diagnostics. Browser cases compare real exclusions and condition outcomes, including a missing parameter beside a valid result, then check recovery from a whole provider fault. |
+| AR04 · Installed actions | Browser cases switch installed revisions, inspect relationship-only resources and promote an existing relation while observing its unchanged decision and check traffic. |
+| AR05 · Cancellation and stale data | Node cases reject invalid later Read pages. Browser cases hold real replies for an obsolete person, condition and explanation, cancel two in-flight batches, fail a later Read page and change a grant between Expand and the verifying Check. |
+| AR06 · Boundaries and recovery | Wire cases reject cross-origin, duplicate, invalid and oversized requests before provider access. Browser cases check read-only traffic, unsaved drafts, in-memory conditions and validated workspace restoration. For rollback, use the previous build with a disposable copy and verify Model, Instances and Batches survive the route preference change. |
+| AR07 · Live walkthrough | On the frozen candidate use installed Chrome and native Safari at 1440 × 900 and 320 px. Select a root and person, expand a muted branch, switch person, inspect a reason and refresh. Verify keyboard focus, readable actions and page width. Retain the walkthrough locally. |
+| AR08 · Scale | Run five managed SQLite reviews, including the first after restart, with 2,000 stored tuples, 200 scoped resources and 1,000 checks. Record catalog, scope, first decision and completion times, outcome totals, progress, cancellation, request size and concurrency. Verify evidence traffic starts only on inspection. |
+
+Run the 19 isolated Node cases with `npm test -- tests/access-review-scope.test.ts tests/access-review-wire.test.ts`. Run the 18 isolated Chrome cases with `npm run test:integration -- tests/access-review.engine.pw.ts`. The complete inventory is 51 Vitest cases, 96 stock-engine cases and 4 Chrome cases, plus the six workspace-isolation scenarios. Use the configured runners without filters, retries, skips or shards for qualification. Collect exact covered and total counts for changed statements, lines, branches and functions. The Vitest coverage command does not itself collect execution from the separate browser and Next.js processes.
+
 ## Synthetic data and transport
 
 Generate a disposable import bundle with node tests/make-fixtures.mjs followed by a local destination path. The inline and relative batches include 108 shared tuples, duplicate case names with different grants, wildcard and userset assertions, and two request timestamps with opposite results. The inline batch adds an exact 100-context case. The overflow batch supplies 101. Use both variants with the [native file contract][format].

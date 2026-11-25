@@ -7,7 +7,7 @@ import { exportBatch, importBatch } from "@/lib/workbench-batches";
 import { decode, modelsResponse, mutationResult, target as targetCodec, type Batch, type InstalledModel,
   type Target, type Workspace, type WorkspaceView,
 } from "@/lib/workbench-contract";
-import { Dialog, download, failureText, invoke, JobStatus, Select } from "./workbench-ui";
+import { Dialog, download, failureText, invoke, JobStatus, revisionOptions, Select } from "./workbench-ui";
 
 /** Show the workspace's authored regression batches and isolated fixture targets. */
 export function BatchScreen({ state, target, stores, endpoint, remember, add, savedRevision, trackCheckpoint, apply }: {
@@ -113,18 +113,18 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
   const offered = !installed && suggestion?.batchId === active?.id ? suggestion?.target : undefined;
   return <main className="wb-split wb-batches">
     <section className="wb-pane" aria-label="Saved batches">
-      <div className="wb-actions"><h1>Batches</h1><button onClick={() => { setMessage(""); setImporting(true); }}>Import</button></div>
+      <header className="wb-pane-heading"><h1>Batches</h1><button onClick={() => { setMessage(""); setImporting(true); }}>Import</button></header>
       <div className="wb-list">{state.batches.map((batch) => <button key={batch.id}
         aria-pressed={batch.id === active?.id} onClick={() => { setMessage(""); remember({ batch: batch.id }); }}>{batch.name}</button>)}</div>
     </section>
     <section className="wb-pane" aria-label="Selected batch">
-      <div className="wb-actions"><h2>{active?.name ?? "Fixture"}</h2>
+      <header className="wb-pane-heading"><h2>{active?.name ?? "Fixture"}</h2>
         <button disabled={!active} onClick={() => { setSplit(false); setExporting(true); }}>Export</button>
-      </div>
+      </header>
       <div className="wb-actions">
         <Select label="Source store" value={store} options={stores.map((entry) => ({ value: entry.id, label: entry.name }))}
           change={(store) => remember({ [storeKey]: store, [modelKey]: "" })} />
-        <Select label="Source model revision" value={revision} options={modelRows.map((model) => model.id)}
+        <Select label="Source model revision" value={revision} options={revisionOptions(modelRows)} title={revision || undefined}
           change={(revision) => remember({ [modelKey]: revision })} />
         {offered && <button onClick={() => remember({ [storeKey]: offered.store, [modelKey]: offered.revision })}>
           Use matching published model

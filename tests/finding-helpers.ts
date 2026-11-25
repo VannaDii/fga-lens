@@ -82,7 +82,7 @@ export async function openTarget(page: Page, target: FixtureTarget, screen: "ins
   await expect(store.locator("option[value='" + target.store + "']")).toHaveCount(1);
   if (await store.inputValue() !== target.store) await store.selectOption(target.store);
   const revision = page.getByRole("combobox", { name: "Model revision", exact: true });
-  await expect(revision.getByRole("option", { name: target.revision, exact: true })).toHaveCount(1);
+  await expect(revision.locator('option[value="' + target.revision + '"]')).toHaveCount(1);
   if (await revision.inputValue() !== target.revision) await revision.selectOption(target.revision);
 }
 

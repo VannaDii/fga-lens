@@ -5,14 +5,17 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import * as t from "io-ts";
+import { Settings } from "lucide-react";
 
 import { FgaLens, LogoMark } from "./fga-lens";
+import { AccessReviewScreen } from "./workbench-access-review";
 import { QueryScreen } from "./workbench-queries";
 import { BatchScreen } from "./workbench-batches";
 import { InstancesScreen, type InstanceDialogHandle, type TuplePublishCounts } from "./workbench-instances";
 import type { TuplePublishFeedback } from "./workbench-tuple-diagnostics";
 import { useWorkbenchState } from "./workbench-state";
-import { Dialog, download, failureText, invoke, JobStatus, Select, TuplePublishRejection } from "./workbench-ui";
+import { Dialog, download, failureText, invoke, JobStatus, revisionOptions, Select, TuplePublishRejection } from "./workbench-ui";
+import { chromeTint } from "@/lib/workbench-appearance";
 import {
   engineId, modelsResponse, sameTuple, screen, storesResponse, tuple, tupleKey, tuplePublicationResult, workspaceView,
   type Draft, type InstalledModel, type Target, type Tuple, type Workspace, type WorkspaceView,
@@ -21,8 +24,10 @@ import {
   emptyDraft, inspectTupleDraft, mergeFetched, publicationConflicts, readYaml, resolveTupleSource, tupleDraftIssue, tupleIndex,
 } from "@/lib/workbench-drafts";
 
-const screens = { model: "Model", instances: "Instances", queries: "Queries", batches: "Batches" };
+const screens = { model: "Model", instances: "Instances", queries: "Queries", "access-review": "Access Review", batches: "Batches" };
 type Editor = "model" | "instances";
+const appearance = t.keyof({ system: null, dark: null, light: null });
+const appearances = { system: "System", dark: "Dark", light: "Light" } as const;
 
 /** Identify the editor snapshot that can receive a diagnostic source jump. */
 type TupleAttempt = { selectedRevision: string; draft: Draft };
@@ -69,7 +74,7 @@ function EditorSync({ editor, draft }: { editor: Editor; draft: Draft }) {
     : draft.conflicts.length ? "Conflict" : draft.replacement ? "Interrupted" : !local ? "Draft issues"
       : tupleChanges(local, draft.baseline) ? "Pending edits" : checked ? "In sync" : "Unfetched";
   const time = checked ? new Date(checked) : null;
-  return <span className="wb-toolbar-sync" aria-live="polite">{model ? "Model" : "Tuples"} · {status}
+  return <span className="wb-sync" aria-live="polite">{model ? "Model" : "Tuples"} · {status}
     {time && Number.isFinite(time.getTime()) && <> · <time dateTime={time.toISOString()}>{time.toLocaleTimeString()}</time></>}
   </span>;
 }
@@ -129,6 +134,8 @@ export function Workbench({ children }: { children: ReactNode }) {
   const jobs = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const route = pathname.slice(1);
   const active = screen.is(route) ? route : "model";
+  const savedAppearance = state.selections?.appearance;
+  const theme = appearance.is(savedAppearance) ? savedAppearance : "system";
   const endpoint = view?.endpoint ?? "";
   const store = state.store;
   const keyFor = (id: string) => endpoint + "/" + id;
@@ -138,6 +145,7 @@ export function Workbench({ children }: { children: ReactNode }) {
   const tupleNotice = editorNotices["instances/" + key] ?? "";
   const tuplePublication = tuplePublications[key];
   const target: Target = { store, revision: state.model };
+  const reviewKey = "access-review/" + JSON.stringify([endpoint, store, target.revision]);
   const model = revisions.find((entry) => entry.id === target.revision);
 
   /** Provide scoped feedback and keep rejected editor data in the local view. */
@@ -145,6 +153,14 @@ export function Workbench({ children }: { children: ReactNode }) {
     set(label + " · " + error.message + (error.message.startsWith("conflict")
       ? " · Local input retained. Download the draft before reloading." : " · Retry the operation"));
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    for (const meta of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) {
+      const systemTheme = meta.media.includes("dark") ? "dark" : "light";
+      meta.content = chromeTint[theme === "system" ? systemTheme : theme];
+    }
+  }, [theme, pathname]);
 
   /** Load the file workspace and migrate legacy content only before the first file save. */
   useEffect(() => {
@@ -414,6 +430,7 @@ export function Workbench({ children }: { children: ReactNode }) {
 
   /** Restore the independent draft and model selection when switching stores. */
   function selectStore(next: string) {
+    if (next === store) return;
     setRevisions([]);
     const capturedKey = keyFor(next);
     remember((prior) => {
@@ -495,7 +512,7 @@ export function Workbench({ children }: { children: ReactNode }) {
     }
   }
 
-  /** Remember either persistent settings button as the dialog's focus return target. */
+  /** Restore focus to the Settings trigger when the dialog closes. */
   function openSettings(event: MouseEvent<HTMLButtonElement>) {
     event.currentTarget.focus();
     setSettings(true);
@@ -511,6 +528,22 @@ export function Workbench({ children }: { children: ReactNode }) {
     ? modelNotice.startsWith("Publish model ·") ? failedModel[key] === draft.dsl ? "Publish again" : "Publish new draft" : "Publish"
     : tupleReport?.phase !== "preflight" && (draft.replacement || tuplePublication?.notice?.includes("Publish again"))
       ? "Publish again" : "Publish";
+  const actions = editor && <div className="wb-editor-actions">
+    {editor === "instances" && <>
+      <button type="button" onClick={(event) => {
+        event.currentTarget.focus();
+        instanceDialog.current?.openNewInstance();
+      }}>New instance</button>
+      <button type="button" onClick={fetchTuples} disabled={!store || Boolean(fetchJob)}>Fetch store tuples</button>
+    </>}
+    <button type="button" disabled={editor === "model" && !view} onClick={() => saveCurrent(editor)}>Save</button>
+    <div className="wb-publish-group">
+      <button type="button" className="wb-publish" disabled={!(editor === "model" ? store : target.revision)
+        || activePublishes.includes(editor + "/" + key)} onClick={() => saveCurrent(editor, true)}>{publishLabel}</button>
+      {editor === "model" && <EditorSync editor={editor} draft={draft} />}
+    </div>
+  </div>;
+  const connection = connected ? "Connected" : "Offline";
   return <div className="workbench">
     <header className="wb-header">
       <div className="wb-header-main">
@@ -525,7 +558,7 @@ export function Workbench({ children }: { children: ReactNode }) {
               <Select label="Store" value={store} title={storeName ? `${storeName} · ${store}` : store || undefined}
                 options={storeList.map((item) => ({ value: item.id, label: item.name }))} change={selectStore} />
               <Select label="Model revision" value={state.model} title={state.model || undefined}
-                options={revisions.map((entry) => entry.id)} change={selectRevision} />
+                options={revisionOptions(revisions)} change={selectRevision} />
             </div>
             {!storeList.length && <button type="button" onClick={(event) => {
               event.currentTarget.focus();
@@ -533,27 +566,14 @@ export function Workbench({ children }: { children: ReactNode }) {
             }}>Create store</button>}
           </>}
           <div className="wb-header-services">
-            <button type="button" className="wb-connection" data-connected={connected || undefined}
-              onClick={openSettings}>{connected ? "Connected" : "Offline"}</button>
-            <button type="button" onClick={openSettings}>Settings</button>
+            <button type="button" className="wb-settings-trigger" aria-label="Settings" aria-describedby="wb-connection-status"
+              title={"Settings · " + connection} onClick={openSettings}>
+              <Settings size={18} aria-hidden /><span className="wb-connection-dot" data-connected={connected || undefined} />
+              <span id="wb-connection-status" hidden>{connection}</span>
+            </button>
           </div>
         </div>
       </div>
-      {editor && <div className="wb-toolbar">
-        {editor === "instances" && <>
-          <button type="button" onClick={(event) => {
-            event.currentTarget.focus();
-            instanceDialog.current?.openNewInstance();
-          }}>New instance</button>
-          <button type="button" onClick={fetchTuples} disabled={!store || Boolean(fetchJob)}>Fetch store tuples</button>
-        </>}
-        <button type="button" disabled={editor === "model" && !view} onClick={() => saveCurrent(editor)}>Save</button>
-        <div className="wb-toolbar-publish">
-          <button type="button" className="wb-publish" disabled={!(editor === "model" ? store : target.revision)
-            || activePublishes.includes(editor + "/" + key)} onClick={() => saveCurrent(editor, true)}>{publishLabel}</button>
-          <EditorSync editor={editor} draft={draft} />
-        </div>
-      </div>}
     </header>
     {view?.recovery && <p role="status" className="wb-notice">Saved workspace could not be decoded · {view.location} ·
       <Link prefetch={false} download href="/api/workbench?recovery">Download saved workspace</Link></p>}
@@ -565,13 +585,14 @@ export function Workbench({ children }: { children: ReactNode }) {
           && <button onClick={() => selectRevision(draft.published ?? "")}>Use published revision</button>}
         {modelNotice && <span role="status">{modelNotice}</span>}
       </div>}
-      {view && <FgaLens key={key} draft={draft} relationId={state.selections?.["model-relation/" + key]}
+      {view && <FgaLens key={key} draft={draft} actions={actions} relationId={state.selections?.["model-relation/" + key]}
         onRelation={(id) => rememberKeys({ ["model-relation/" + key]: id })} onDraft={(dsl, validDsl) => {
         change((prior) => changeDraft(prior, key, (draft) => ({ ...draft, dsl, validDsl: validDsl ?? draft.validDsl })));
         saveCurrent("model", false, true);
       }} />}
     </>}
     {active === "instances" && <InstancesScreen key={key} draft={draft} model={model} ref={instanceDialog}
+      actions={actions} sync={<EditorSync editor="instances" draft={draft} />}
       publication={tupleReport} publicationSourceMatches={tupleSourceMatches}
       publishNotice={tuplePublication?.notice} publishCounts={tuplePublication?.counts}
       selections={Object.fromEntries(Object.entries(state.selections ?? {}).filter(([name]) => name.startsWith(key + "/instance"))
@@ -603,6 +624,8 @@ export function Workbench({ children }: { children: ReactNode }) {
         return persist(update).then(() => change(update));
       },
     }} />}
+    {active === "access-review" && <AccessReviewScreen key={reviewKey} target={target}
+      preferenceKey={reviewKey} saved={state.selections?.[reviewKey]} remember={rememberKeys} />}
     {active === "batches" && <BatchScreen state={state} target={target} stores={storeList} endpoint={endpoint}
       remember={rememberKeys}
       add={async (batch) => {
@@ -612,19 +635,35 @@ export function Workbench({ children }: { children: ReactNode }) {
       }}
       savedRevision={savedRevision} trackCheckpoint={trackCheckpoint}
       apply={(receipt) => accept(receipt, (prior, persisted) => ({ ...prior, batches: persisted.batches, report: persisted.report }), true)} />}
-    {settings && <Dialog title="Settings" close={() => setSettings(false)}>
-      <dl><dt>Endpoint</dt><dd>{endpoint || "Unavailable"}</dd><dt>Workspace</dt><dd>{view?.location ?? "Loading"}</dd>
-        <dt>Connection</dt><dd>{connected ? "Connected" : "Offline"}</dd></dl>
-      <label><input type="checkbox" checked={state.autoSave} onChange={(event) => {
-        const autoSave = event.target.checked;
-        remember((prior) => ({ ...prior, autoSave }));
-      }} /> Auto-save</label>
-      <label><input type="checkbox" checked={state.autoPublish} onChange={(event) => {
-        const autoPublish = event.target.checked;
-        remember((prior) => ({ ...prior, autoPublish }));
-      }} /> Auto-publish</label>
-      <button onClick={loadStores}>Retry connection</button>
-      {notice.startsWith("Connect to OpenFGA") && <p role="status">{notice}</p>}
+    {settings && <Dialog title="Settings" iconClose close={() => setSettings(false)}>
+      <div className="wb-settings">
+        <dl className="wb-settings-values">
+          <div><dt>Connection</dt><dd className="wb-settings-connection">
+            <span role="status"><span className="wb-connection-dot" data-connected={connected || undefined} />{connection}</span>
+            <button type="button" onClick={loadStores}>Retry connection</button>
+          </dd></div>
+          <div><dt>Endpoint</dt><dd><code>{endpoint || "Unavailable"}</code></dd></div>
+          <div><dt>Workspace</dt><dd><code>{view?.location ?? "Loading"}</code></dd></div>
+        </dl>
+        {notice.startsWith("Connect to OpenFGA") && <p role="status">{notice}</p>}
+        <div className="wb-settings-group">
+          <strong id="workbench-appearance">Appearance</strong>
+          <div className="wb-theme-picker" role="group" aria-labelledby="workbench-appearance">
+            {Object.entries(appearances).map(([value, label]) => <button type="button" key={value}
+              aria-pressed={theme === value} onClick={() => rememberKeys({ appearance: value })}>{label}</button>)}
+          </div>
+        </div>
+        <div className="wb-settings-group">
+          <label><input type="checkbox" checked={state.autoSave} onChange={(event) => {
+            const autoSave = event.target.checked;
+            remember((prior) => ({ ...prior, autoSave }));
+          }} /> Auto-save</label>
+          <label><input type="checkbox" checked={state.autoPublish} onChange={(event) => {
+            const autoPublish = event.target.checked;
+            remember((prior) => ({ ...prior, autoPublish }));
+          }} /> Auto-publish</label>
+        </div>
+      </div>
     </Dialog>}
     {create && <Dialog title="Create store" close={() => setCreate(false)}>
       <form onSubmit={(event) => {

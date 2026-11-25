@@ -1,6 +1,6 @@
 # FGA Lens
 
-FGA Lens is a local OpenFGA workbench for authoring authorization models, editing tuples, inspecting query evidence and running saved regression cases.
+FGA Lens is a local OpenFGA workbench for authoring authorization models, editing tuples, inspecting query evidence, reviewing effective access and running saved regression cases.
 
 ## Run locally
 
@@ -28,13 +28,23 @@ The launcher migrates SQLite in `.fga-workspace/` and starts Next.js after OpenF
 
 ## Workspace
 
-Model and Instances edits save locally by default. Auto-publish is off initially and is configurable in Settings. The workbench keeps store-specific source, tuple drafts and baselines. Queries use the selected installed model, published tuples and any explicitly selected contextual tuples. Opening the root URL restores the most recently saved screen.
+Model and Instances edits save locally by default. Auto-publish is off initially and is configurable in Settings. The workbench keeps store-specific source, tuple drafts and baselines. Queries use the selected installed model, published tuples and any explicitly selected contextual tuples. Opening the root URL restores the most recently saved screen. Settings remembers the workspace appearance. **System** follows the device theme.
+
+Model revision selectors number installed revisions within each store, starting with the oldest. The selector tooltip and query results show the exact OpenFGA ID. On Instances, the info button beside the heading shows the tuple sync time and last publication counts.
 
 **Fetch store tuples** preserves the previous baseline and fetch time if either the current or saved Tuple YAML cannot merge. The editor shows the cause and its source location. Correct the indicated YAML, save it, then fetch again. **Publish** checks the intended additions, replacements and removals against the selected installed model before making any tuple writes.
 
 The default workspace directory is `.fga-workspace/`. Set `FGA_WORKSPACE_DIR` for a separate workspace. If the saved file cannot be decoded, use **Download saved workspace** to recover the original bytes. New saves go to a separate recovery file. Stop the workbench before replacing saved state manually.
 
 The model editor includes the official ANTLR-backed DSL parser and seven example models. The bundled examples come from [OpenFGA Sample Stores][sample-stores], Copyright 2022 Okta, Inc., under the [Apache License 2.0][sample-license].
+
+## Access Review
+
+Open **Access Review**, choose an installed model revision, then select an organization and a person. The chart keeps all connected branches in view and mutes branches whose checked actions all return a denial. Expand branches for more resources. Use the outline to inspect the same actions by keyboard.
+
+The review uses published tuples. **Scope relationships** selects which model-defined links establish containment and which relationships appear as actions. Open an action's **Why** panel for the original verdict and supporting relationships when a later check corroborates the result. **Refresh** reads the hierarchy and runs the access checks again. Condition inputs and results stay in memory.
+
+Before opening the same workspace in an older build, visit **Model** and allow that selection to save. For an offline rollback, stop the workbench, copy the workspace file, and set its top-level route to `"model"` if the current value is `"access-review"`.
 
 ## Regression batches
 
