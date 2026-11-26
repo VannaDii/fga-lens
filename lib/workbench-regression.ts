@@ -90,7 +90,7 @@ export async function runBatch(
         try {
           const found = await runQuery(fixture, request, signal);
           rows.push({ ...row, status: matches(expected, found.outcome) ? "pass" : "fail",
-            actual: found.outcome, elapsed: found.elapsed });
+            actual: found.outcome, response: found.raw, elapsed: found.elapsed });
         } catch (error) {
           rows.push({ ...row, status: "error", actual: null, elapsed: performance.now() - started,
             failure: diagnose(error instanceof OperationFailure ? error : null, started) });

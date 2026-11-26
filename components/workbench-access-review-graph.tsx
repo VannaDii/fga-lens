@@ -5,8 +5,10 @@ import {
   Background, Controls, Handle, MarkerType, Position, ReactFlow, type Edge, type Node, type NodeProps, type ReactFlowInstance,
 } from "@xyflow/react";
 
-import type { ReviewResource, ReviewScope } from "@/lib/workbench-access-review-contract";
+import type { ReviewEdge, ReviewResource, ReviewScope } from "@/lib/workbench-access-review-contract";
 import { reviewPair } from "@/lib/workbench-access-review-contract";
+
+import type { AccessFilter } from "./workbench-access-review-filter";
 
 export type ReviewTone = "allowed" | "denied" | "matches" | "muted";
 export type AccessReviewGraphHandle = { recenter: () => void };
@@ -28,6 +30,11 @@ const cardWidth = 248;
 const cardHeight = ({ relations }: ReviewResource) => 82 + relations.length * 49;
 // Use the known dimensions even for cards whose content just changed.
 const fitOptions = { padding: 0.13, includeHiddenNodes: true };
+
+function viewportTransition() {
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  return { duration: reduceMotion ? 0 : 320, interpolate: "linear" as const };
+}
 
 /** Give controlled cards stable box and connector geometry while live decisions change their contents. */
 function cardHandles(height: number): ReviewNode["handles"] {
@@ -70,10 +77,15 @@ function positions(root: string, resources: ReviewResource[]) {
   return result;
 }
 
-/** Lay out the full hierarchy independently of access decisions. */
-export function AccessReviewGraph({ scope, visible, selection, cardTones, branchTones, highlighted, render, select, viewportChanged, ref }: {
+/** Lay out the shared view and fit the camera when the user changes its structure or filter. */
+export function AccessReviewGraph({ scope, links, visible, expanded, mode, matchingLinks, selection, cardTones,
+  branchTones, highlighted, render, select, viewportChanged, ref }: {
   scope: ReviewScope;
+  links: ReviewEdge[];
   visible: ReviewResource[];
+  expanded: ReadonlySet<string>;
+  mode: AccessFilter;
+  matchingLinks?: ReadonlySet<ReviewEdge>;
   selection: { object: string; focusChart: boolean } | undefined;
   cardTones: Map<string, ReviewTone | undefined>;
   branchTones: Map<string, ReviewTone | undefined>;
@@ -85,17 +97,25 @@ export function AccessReviewGraph({ scope, visible, selection, cardTones, branch
 }) {
   const layout = useMemo(() => positions(scope.root, visible), [scope.root, visible]);
   const flow = useRef<ReactFlowInstance<ReviewNode, Edge>>(null);
-  useImperativeHandle(ref, () => ({ recenter: () => { void flow.current?.fitView(fitOptions); } }), []);
+  const fittedMode = useRef(mode);
+  useImperativeHandle(ref, () => ({
+    recenter: () => { void flow.current?.fitView({ ...fitOptions, ...viewportTransition() }); },
+  }), []);
   useEffect(() => {
-    const frame = requestAnimationFrame(() => { void flow.current?.fitView(fitOptions); });
+    const frame = requestAnimationFrame(() => {
+      const transition = fittedMode.current === mode ? {} : viewportTransition();
+      fittedMode.current = mode;
+      void flow.current?.fitView({ ...fitOptions, ...transition });
+    });
     return () => cancelAnimationFrame(frame);
-  }, [layout]);
+  }, [scope, expanded, mode]);
   useEffect(() => {
     if (!selection?.focusChart) return;
     const frame = requestAnimationFrame(() => {
-      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      void flow.current?.fitView({ ...fitOptions, nodes: [{ id: selection.object }], maxZoom: 1,
-        duration: reduceMotion ? 0 : 320, interpolate: "linear" });
+      const chart = flow.current;
+      if (!chart?.getNode(selection.object)) return;
+      void chart.fitView({ ...fitOptions, nodes: [{ id: selection.object }], maxZoom: 1,
+        ...viewportTransition() });
     });
     return () => cancelAnimationFrame(frame);
   }, [selection]);
@@ -110,13 +130,13 @@ export function AccessReviewGraph({ scope, visible, selection, cardTones, branch
     };
   });
   const parents = useMemo(() => new Map(scope.resources.map(({ object, parent }) => [object, parent])), [scope]);
-  const links = useMemo(() => Map.groupBy(scope.edges.filter(({ parent, child }) =>
-    parent !== child && layout.has(parent) && layout.has(child)), ({ parent, child }) => reviewPair(parent, child)), [scope.edges, layout]);
-  const edges: Edge[] = [...links].map(([id, group]) => {
+  const visibleLinks = useMemo(() => Map.groupBy(links.filter(({ parent, child }) =>
+    parent !== child && layout.has(parent) && layout.has(child)), ({ parent, child }) => reviewPair(parent, child)), [links, layout]);
+  const edges: Edge[] = [...visibleLinks].map(([id, group]) => {
     const { parent, child } = group[0];
     const onPath = group.some((edge) => highlighted.has(JSON.stringify([edge.subject, edge.relation, edge.object])));
     const primary = parents.get(child) === parent;
-    const tone = branchTones.get(child);
+    const tone = matchingLinks ? group.some((edge) => matchingLinks.has(edge)) ? mode : undefined : branchTones.get(child);
     const color = tone === "allowed" ? "var(--green)" : tone === "denied" ? "var(--red)"
       : onPath || tone === "matches" ? "var(--blue)" : "var(--subtle)";
     const relations = [...new Set(group.map(({ relation }) => relation))].sort().join(" · ");

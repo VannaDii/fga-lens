@@ -11,6 +11,7 @@ import {
 import { decode, evidenceResult, tupleKey, type ConditionContext, type Target } from "@/lib/workbench-contract";
 import { contextValue, invalidContext } from "@/lib/workbench-models";
 
+import { filterReview, isAction, type AccessFilter } from "./workbench-access-review-filter";
 import { AccessReviewGraph, type AccessReviewGraphHandle, type ReviewTone } from "./workbench-access-review-graph";
 import { useReviewEvaluation, type Row } from "./workbench-access-review-state";
 import { Disclosure, failureText, invoke } from "./workbench-ui";
@@ -23,13 +24,16 @@ type Inspection = {
   evidence?: TypeOf<typeof evidenceResult>; error?: string;
 };
 const emptyNames: string[] = [];
+const emptyResources: ReviewResource[] = [];
+const accessFilters = [
+  ["all", "All"], ["allowed", "Allowed"], ["denied", "Denied"],
+] as const;
 const roles = { grant: "Assignment", group: "Group membership", parent: "Parent relationship",
   required: "Required relationship", blocking: "Blocking relationship" };
 
 const typeOf = (object: string) => object.split(":", 1)[0];
 const words = (value: string) => value.replace(/[-_]+/g, " ").replace(/^\p{L}/u, (first) => first.toUpperCase());
 const objectLabel = (object: string) => words(object.slice(object.indexOf(":") + 1));
-const isAction = (relation: string) => relation.startsWith("can_");
 const message = (error: unknown) => error instanceof Error ? error.message : "server error";
 const time = (stamp: number) => new Date(stamp).toLocaleTimeString();
 const duration = (ms: number) => ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : ms.toFixed(1) + " ms";
@@ -257,6 +261,7 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
   const [preferences, setPreferences] = useState(() => restore(saved));
   const [structureSelection, setStructureSelection] = useState(0);
   const [checkSelection, setCheckSelection] = useState(0);
+  const [mode, setMode] = useState<AccessFilter>("all");
   const latest = useRef(preferences);
   const rememberLatest = useRef(remember);
   useEffect(() => { rememberLatest.current = remember; }, [remember]);
@@ -264,6 +269,7 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
     const next = { ...latest.current, ...patch };
     if (next.root !== latest.current.root) setStructureSelection((previous) => previous + 1);
     if (next.subject !== latest.current.subject) setCheckSelection((previous) => previous + 1);
+    if (next.root !== latest.current.root || !next.subject) setMode("all");
     latest.current = next;
     setPreferences(next);
     rememberLatest.current({ [preferenceKey]: JSON.stringify(next) });
@@ -272,7 +278,7 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
   const [epoch, setEpoch] = useState(0);
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [emptyStrings, setEmptyStrings] = useState<Set<string>>(() => new Set());
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [selection, setSelection] = useState<{ object: string; focusChart: boolean }>();
   const [inspection, setInspection] = useState<Inspection>();
   const infoId = useId();
@@ -281,6 +287,7 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
   const whyPanel = useRef<HTMLElement>(null);
   const chartPanel = useRef<HTMLElement>(null);
   const chartGraph = useRef<AccessReviewGraphHandle>(null);
+  const filterControls = useRef<HTMLDivElement>(null);
   const outlineList = useRef<HTMLDivElement>(null);
   const whyFrame = useRef<number>(null);
   const { catalog, scope, current, issue, removed, loading } = useReviewDiscovery(target, epoch, structureSelection, preferences, save, latest);
@@ -293,20 +300,30 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
   const { run, key: runKey, total, cancel } = useReviewEvaluation(scope, target, subject, context, current && !invalid, checkSelection);
   const activeWhy = !invalid && inspection?.runKey === runKey && runKey ? inspection : undefined;
   useEffect(() => () => evidenceRequest.current?.abort(), []);
-  const children = useMemo(() => Map.groupBy(scope?.resources ?? [], ({ parent }) => parent), [scope]);
+  const rows = invalid ? undefined : run?.rows;
+  const filtered = useMemo(() => scope && mode !== "all" ? filterReview(scope, rows, mode) : undefined,
+    [scope, rows, mode]);
+  const resources = filtered?.resources ?? scope?.resources ?? emptyResources;
+  const links = filtered?.edges ?? scope?.edges;
+  const children = useMemo(() => Map.groupBy(resources, ({ parent }) => parent), [resources]);
   const visible = useMemo(() => {
     const shown = new Set<string>();
-    return scope?.resources.filter(({ object, parent }) => {
-      if (parent && (!shown.has(parent) || collapsed.has(parent))) return false;
+    return resources.filter(({ object, parent }) => {
+      if (parent && (!shown.has(parent) || !expanded.has(parent))) return false;
       shown.add(object);
       return true;
-    }) ?? [];
-  }, [scope, collapsed]);
-  const branches = useMemo(() => scope ? branchInventory(scope) : new Map<string, ReviewResource[]>(), [scope]);
+    });
+  }, [resources, expanded]);
+  const branches = useMemo(() => scope && mode === "all" ? branchInventory(scope) : undefined, [scope, mode]);
   const incoming = useMemo(() => Map.groupBy(scope?.edges ?? [], ({ child }) => child), [scope]);
-  const rows = invalid ? undefined : run?.rows;
-  const cardTones = new Map(scope?.resources.map((resource) => [resource.object, summarize([resource], rows)]));
-  const branchTones = new Map([...branches].map(([object, branch]) => [object, summarize(branch, rows)]));
+  const verdict = mode === "all" ? undefined : mode;
+  const cardTones = new Map(resources.map((resource) => [resource.object, filtered
+    ? filtered.matches.has(resource.object) ? verdict : "muted"
+    : summarize([resource], rows)] as const));
+  const matchingParents = new Set(filtered && [...filtered.matchingLinks].map(({ parent, child }) => reviewPair(parent, child)));
+  const branchTones = new Map(resources.map(({ object, parent }) => [object, filtered
+    ? parent && matchingParents.has(reviewPair(parent, object)) ? verdict : undefined
+    : summarize(branches?.get(object) ?? [], rows)] as const));
   const highlighted = new Set(activeWhy?.evidence?.supporting?.map(({ tuple }) => tupleKey(tuple)));
   const available = catalog?.objects ?? emptyNames;
 
@@ -368,7 +385,7 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
   }
 
   function toggleBranch(object: string) {
-    setCollapsed((previous) => {
+    setExpanded((previous) => {
       const next = new Set(previous);
       if (!next.delete(object)) next.add(object);
       return next;
@@ -378,7 +395,9 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
   function closeWhy() {
     evidenceRequest.current?.abort();
     setInspection(undefined);
-    evidenceTrigger.current?.focus({ preventScroll: true });
+    const trigger = evidenceTrigger.current?.isConnected ? evidenceTrigger.current
+      : filterControls.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]');
+    trigger?.focus({ preventScroll: true });
     evidenceTrigger.current = null;
   }
 
@@ -422,19 +441,22 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
     const label = objectLabel(object);
     const actions = relations.filter(isAction);
     const relationships = relations.filter((relation) => !isAction(relation));
-    const folded = collapsed.has(object);
+    const isExpanded = expanded.has(object);
     const selected = selection?.object === object;
     const whyRelation = [...actions, ...relationships].find((relation) => {
       const row = rows?.get(reviewPair(object, relation));
       return row && "allowed" in row;
     });
     const focusLabel = "Focus " + label + " on chart";
+    const contextLabel = filtered && !filtered.matches.has(object)
+      ? actions.length ? "Context" : "No actions defined"
+      : undefined;
     return <>
       <div className="review-resource-header">
         {children.get(object)?.length ? <button type="button" className="wb-icon-button review-card-button nodrag"
-          aria-expanded={!folded} aria-label={(folded ? "Expand " : "Collapse ") + label}
+          aria-expanded={isExpanded} aria-label={(isExpanded ? "Collapse " : "Expand ") + label}
           onClick={() => toggleBranch(object)}>
-          {folded ? <ChevronRight size={16} aria-hidden /> : <ChevronDown size={16} aria-hidden />}
+          {isExpanded ? <ChevronDown size={16} aria-hidden /> : <ChevronRight size={16} aria-hidden />}
         </button> : null}
         {outline ? <>
           <strong className="review-outline-name" title={object}>{label}</strong>
@@ -454,6 +476,7 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
           <CircleQuestionMark size={16} aria-hidden />
         </button>}
       </div>
+      {contextLabel && <small className="review-context">{contextLabel}</small>}
       {relations.length > 0 && <div className="review-decisions">
         {actions.map((relation) => decision(resource, relation, true))}
         {relationships.map((relation) => decision(resource, relation, false))}
@@ -484,7 +507,7 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
         data-matches={tone === "matches" || undefined} data-selected={selection?.object === resource.object || undefined}>
         {renderResource(resource, true)}
       </article>
-      {!collapsed.has(resource.object) && descendants?.length
+      {expanded.has(resource.object) && descendants?.length
         ? <ul>{descendants.map(outlineBranch)}</ul> : null}
     </li>;
   }
@@ -493,6 +516,8 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
   const unavailable = [...(run?.rows.values() ?? [])].filter((row) => !("allowed" in row) && !("missing" in row && row.missing?.length)).length;
   const showChecks = Boolean(subject && !invalid && total > 0);
   const checking = current && (!run || run.phase === "running");
+  const noMatches = filtered?.matches.size === 0 && current && !invalid &&
+    (total === 0 || Boolean(run && run.phase !== "running"));
   const { firstResults, laterBatches, elapsed } = run?.timing ?? {};
   const checkRecovery = run?.diagnostic?.startsWith("invalid input")
     ? "Verify the selected revision and that the endpoint accepts up to 25 checks per request."
@@ -547,7 +572,7 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
           </div>
           <div className="review-chart-selectors">
             <ReviewPicker label="Start at" value={preferences.root ?? ""} objects={available} preferredType="organization"
-              change={(root) => { setCollapsed(new Set()); setSelection(undefined); save({ root }); }} />
+              change={(root) => { setExpanded(new Set()); setSelection(undefined); save({ root }); }} />
             <ReviewPicker label="View as" value={subject} objects={available} preferredType="user"
               change={(subject) => save({ subject })} />
             <button type="button" className="wb-icon-button wb-icon-button-quiet" aria-label="Refresh" title="Refresh review"
@@ -591,15 +616,26 @@ export function AccessReviewScreen({ target, preferenceKey, saved, remember }: {
         {(!target.store || !target.revision) && <p>Select a store and an installed model revision.</p>}
         {run?.diagnostic && <p role="alert">Checks unavailable · {run.diagnostic} · {checkRecovery}</p>}
         {scope && <>
-          <AccessReviewGraph scope={scope} visible={visible} selection={selection} cardTones={cardTones} branchTones={branchTones}
+          <AccessReviewGraph scope={scope} links={links ?? scope.edges} visible={visible} expanded={expanded} mode={mode}
+            matchingLinks={filtered?.matchingLinks} selection={selection} cardTones={cardTones} branchTones={branchTones}
             highlighted={highlighted} render={(resource) => renderResource(resource, false)} select={selectResource}
             viewportChanged={viewportChanged} ref={chartGraph} />
-          {scope.edges.some(({ subject, object, relation }) => highlighted.has(tupleKey({ user: subject, object, relation }))) &&
+          {links?.some(({ subject, object, relation }) => highlighted.has(tupleKey({ user: subject, object, relation }))) &&
             <p className="review-legend">Highlighted links show relationships observed after the check.</p>}
         </>}
       </section>
-      {scope && <section className="wb-pane review-outline" aria-label="Access outline"><header className="wb-pane-heading"><h2>Access outline</h2></header>
-        <div className="review-outline-list" ref={outlineList}><ul>{(children.get(null) ?? []).map(outlineBranch)}</ul></div>
+      {scope && <section className="wb-pane review-outline" aria-label="Access outline">
+        <header className="wb-pane-heading">
+          <h2>Access outline</h2>
+          <div className="review-filter" role="group" aria-label="Access filter" ref={filterControls}>
+            {accessFilters.map(([value, label]) => <button type="button" key={value} aria-pressed={mode === value}
+              disabled={value !== "all" && !subject} onClick={() => setMode(value)}>{label}</button>)}
+          </div>
+        </header>
+        <div className="review-outline-list" ref={outlineList}>
+          {noMatches && <p className="review-no-matches" role="status">No confirmed {mode} actions</p>}
+          <ul>{(children.get(null) ?? []).map(outlineBranch)}</ul>
+        </div>
       </section>}
     </div>
     {inspection && <Why current={inspection} previous={!activeWhy} close={closeWhy} panel={whyPanel} />}

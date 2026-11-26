@@ -7,7 +7,7 @@ import { exportBatch, importBatch } from "@/lib/workbench-batches";
 import { decode, modelsResponse, mutationResult, target as targetCodec, type Batch, type InstalledModel,
   type Target, type Workspace, type WorkspaceView,
 } from "@/lib/workbench-contract";
-import { JsonBlock } from "./workbench-source-syntax";
+import { BatchResults, BatchTargets } from "./workbench-batch-results";
 import { Dialog, Disclosure, download, failureText, invoke, JobStatus, revisionOptions, Select } from "./workbench-ui";
 
 /** Show the workspace's authored regression batches and isolated fixture targets. */
@@ -27,9 +27,11 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
   const selectionKey = "batch-cases/" + active?.id;
   const chosenStore = state.selections?.[storeKey] ?? known?.store ?? target.store;
   const store = stores.some((entry) => entry.id === chosenStore) ? chosenStore : "";
-  const revision = state.selections?.[modelKey] ?? known?.revision ?? (store === target.store ? target.revision : "");
+  const preferredRevision = state.selections?.[modelKey]
+    ?? (known?.store === store ? known.revision : store === target.store ? target.revision : "");
   const [models, setModels] = useState<{ store: string; rows: InstalledModel[] }>({ store: "", rows: [] });
   const [suggestion, setSuggestion] = useState<{ batchId: string; target: Target } | null>(null);
+  const [closedBatch, setClosedBatch] = useState<string>();
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [split, setSplit] = useState(false);
@@ -37,13 +39,14 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
   const [job, setJob] = useState("");
   const [message, setMessage] = useState("");
   const modelRows = models.store === store ? models.rows : [];
+  const revision = preferredRevision || modelRows[0]?.id || "";
   const selected = chooseCases(state.selections?.[selectionKey], active);
   const installed = modelRows.some((model) => model.id === revision);
+  const preferredInstalled = modelRows.some((model) => model.id === preferredRevision);
   const fixture = installation?.fixture;
   const staged = fixture && stores.some(({ id }) => id === fixture.store)
     && known?.store === store && known.revision === revision && installed;
   const report = active?.id === state.report?.batchId && endpoint === state.report?.connection ? state.report : undefined;
-  const rows = report?.rows ?? [];
   const focusedBatch = active?.id;
 
   /** Read revisions for the current source store, ignoring prior selector requests. */
@@ -59,7 +62,7 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
   /** Offer uniquely matching imported model content as an optional source. */
   const importedDsl = active?.model;
   useEffect(() => {
-    if (!focusedBatch || !importedDsl || installed || !stores.length) return;
+    if (!focusedBatch || !importedDsl || preferredInstalled || !stores.length) return;
     const controller = new AbortController();
     void invoke(t.type({ match: t.union([targetCodec, t.null]) }), {
       action: "suggest-model", dsl: importedDsl,
@@ -69,7 +72,7 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
       if (!controller.signal.aborted) setMessage("Find published model · " + error.message);
     });
     return () => controller.abort();
-  }, [focusedBatch, importedDsl, installed, stores.length]);
+  }, [focusedBatch, importedDsl, preferredInstalled, stores.length]);
 
   /**
    * Preserve fixture sync on errors and retain the captured source and run report on success.
@@ -115,56 +118,62 @@ export function BatchScreen({ state, target, stores, endpoint, remember, add, sa
     }
   }
 
-  const offered = !installed && suggestion?.batchId === active?.id ? suggestion?.target : undefined;
+  const match = !preferredInstalled && suggestion?.batchId === active?.id ? suggestion?.target : undefined;
+  const offered = match && (match.store !== store || match.revision !== revision) ? match : undefined;
   return <main className="wb-split wb-batches">
     <section className="wb-pane" aria-label="Saved batches">
       <header className="wb-pane-heading"><h1>Batches</h1><button onClick={() => { setMessage(""); setImporting(true); }}>Import</button></header>
-      <div className="wb-list">{state.batches.map((batch) => <button key={batch.id}
-        aria-pressed={batch.id === active?.id} onClick={() => { setMessage(""); remember({ batch: batch.id }); }}>{batch.name}</button>)}</div>
+      {state.batches.map((batch) => {
+        const isActive = batch.id === focusedBatch;
+        const count = batch.cases.length;
+        return <Disclosure key={batch.id} title={batch.name} className={isActive ? "wb-batch-active" : undefined}
+          meta={isActive ? `${selected.length} of ${count} selected` : `${count} ${count === 1 ? "case" : "cases"}`}
+          open={isActive && closedBatch !== batch.id} onOpenChange={(open) => {
+            if (!open) {
+              if (isActive) setClosedBatch(batch.id);
+              return;
+            }
+            setClosedBatch(undefined);
+            if (!isActive) { setMessage(""); remember({ batch: batch.id }); }
+          }}>
+          {isActive && (count ? <div className="wb-batch-cases" role="group" aria-label={batch.name + " cases"}>
+            <label><input type="checkbox" checked={count === selected.length} onChange={(event) => remember({
+              [selectionKey]: JSON.stringify(event.target.checked ? batch.cases.map((entry) => entry.id) : []),
+            })} />Select all</label>
+            <ul role="list">{batch.cases.map((entry, index) => <li key={entry.id}>
+              <label><input type="checkbox" checked={selected.includes(entry.id)} onChange={(event) => remember({
+                [selectionKey]: JSON.stringify(event.target.checked
+                  ? [...selected, entry.id] : selected.filter((id) => id !== entry.id)),
+              })} /><span>{index + 1}. {entry.name}</span></label>
+            </li>)}</ul>
+          </div> : <p className="wb-result-note">This batch has no cases.</p>)}
+        </Disclosure>;
+      })}
+      {!state.batches.length && <p className="wb-result-note">Import a batch or save a query to get started.</p>}
     </section>
     <section className="wb-pane" aria-label="Selected batch">
-      <header className="wb-pane-heading"><h2>{active?.name ?? "Fixture"}</h2>
-        <button disabled={!active} onClick={() => { setSplit(false); setExporting(true); }}>Export</button>
+      <header className="wb-pane-heading"><h2>{active?.name ?? "Batch"}</h2>
+        <div className="wb-actions wb-form-actions wb-batch-controls">
+          <Select label="Source store" value={store} options={stores.map((entry) => ({ value: entry.id, label: entry.name }))}
+            change={(store) => remember({ [storeKey]: store, [modelKey]: "" })} />
+          <Select label="Source model revision" value={revision} options={revisionOptions(modelRows)} title={revision || undefined}
+            change={(revision) => remember({ [modelKey]: revision })} />
+          <button disabled={!active || !installed || Boolean(pending)} onClick={() => execute("fixture")}>Publish fixture</button>
+          <button disabled={!staged || !selected.length || Boolean(pending)} onClick={() => execute("batch")}>Run selected</button>
+          <button disabled={!active} onClick={() => { setSplit(false); setExporting(true); }}>Export</button>
+        </div>
       </header>
-      <div className="wb-actions wb-form-actions">
-        <Select label="Source store" value={store} options={stores.map((entry) => ({ value: entry.id, label: entry.name }))}
-          change={(store) => remember({ [storeKey]: store, [modelKey]: "" })} />
-        <Select label="Source model revision" value={revision} options={revisionOptions(modelRows)} title={revision || undefined}
-          change={(revision) => remember({ [modelKey]: revision })} />
-        {offered && <button onClick={() => remember({ [storeKey]: offered.store, [modelKey]: offered.revision })}>
-          Use matching published model
-        </button>}
-        <button disabled={!active || !installed || Boolean(pending)} onClick={() => execute("fixture")}>Publish fixture</button>
-        <button disabled={!staged || !selected.length || Boolean(pending)} onClick={() => execute("batch")}>Run selected</button>
-      </div>
-      {job ? <JobStatus key={job} id={job} label="Running selected cases" unit="cases" />
-        : <p role="status">{pending ? "Publishing fixture…" : staged && !message ? "Fixture staged" : "Fixture needs verification"}</p>}
+      {offered && <button onClick={() => remember({ [storeKey]: offered.store, [modelKey]: offered.revision })}>
+        Use matching published model
+      </button>}
+      {job && <JobStatus key={job} id={job} label="Running selected cases" unit="cases" />}
       {message && !importing && <p role="status">{message}</p>}
       {active && <>
-        <dl><dt>Source model</dt><dd>{known ? known.store + " · " + known.revision : "Unstaged"}</dd>
-          <dt>Actual fixture</dt><dd>{fixture ? fixture.store + " · " + fixture.revision : installation?.store ?? "Unstaged"}</dd></dl>
-        <div className="wb-actions"><h3>Cases</h3><label><input type="checkbox" checked={active.cases.length === selected.length}
-          onChange={(event) => remember({ [selectionKey]: JSON.stringify(event.target.checked ? active.cases.map((entry) => entry.id) : []) })} />
-          Select all</label></div>
-        {active.cases.map((entry, index) => <label key={entry.id}><input type="checkbox" checked={selected.includes(entry.id)}
-          onChange={(event) => remember({ [selectionKey]: JSON.stringify(event.target.checked
-            ? [...selected, entry.id] : selected.filter((id) => id !== entry.id)) })} />
-          {index + 1}. {entry.name} · {rows.some((row) => row.caseId === entry.id) ? "Results below" : "Not run"}
-        </label>)}
-        {report && <><h3>Last run</h3>
-          <p>Source {report.source.store} · {report.source.revision}</p>
-          <p>Fixture {report.fixture.store} · {report.fixture.revision}</p>
-          <p>Higher consistency · {(["pass", "fail", "error", "unrun"] as const)
-            .map((status) => status + " " + rows.filter((row) => row.status === status).length).join(" · ")}</p>
-          <div className="wb-table"><table><thead><tr><th>Case</th><th>Operation</th><th>Expected</th><th>Actual</th><th>Result</th><th>Time</th></tr></thead>
-            <tbody>{rows.map((row, index) => <tr key={index}><td>Case {row.caseIndex + 1} · {row.name}</td>
-              <td>{row.operation}{row.input && " · " + row.input.relation}
-                {row.input && <Disclosure title={"Assertion " + ((row.assertionIndex ?? 0) + 1) + " request"}>
-                  <JsonBlock value={row.input} />
-                </Disclosure>}
-              </td>
-              <td>{JSON.stringify(row.expected)}</td><td>{row.actual === null ? "—" : JSON.stringify(row.actual)}</td>
-              <td>{row.status}{row.failure && " · " + failureText(row.failure)}</td><td>{row.elapsed.toFixed(1)} ms</td></tr>)}</tbody></table></div></>}
+        <Disclosure title="Fixture details" meta={<span role="status">{pending === "fixture" ? "Publishing fixture…"
+          : staged && !message ? "Fixture staged" : "Fixture needs verification"}</span>}>
+          <BatchTargets source={known} fixture={fixture} fixtureStore={installation?.store} />
+        </Disclosure>
+        {report ? <BatchResults key={active.id} report={report} /> : <p className="wb-result-note">No saved run for this batch.</p>}
       </>}
     </section>
     {importing && <Dialog title="Import batch" close={() => setImporting(false)}>

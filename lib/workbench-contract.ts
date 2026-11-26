@@ -212,7 +212,7 @@ const reportRow = t.intersection([t.type({
   caseId: nonempty, caseIndex: t.number, name: nonempty, operation: t.string, expected: outcome,
   status: t.keyof({ pass: null, fail: null, error: null, unrun: null }),
   actual: t.union([outcome, t.null]), elapsed: t.number,
-}), t.partial({ failure, assertionIndex: t.number, input: query })]);
+}), t.partial({ failure, assertionIndex: t.number, input: query, response: json })]);
 
 /** Persist the source and actual fixture bound to an independently observed run. */
 export const report = t.type({ batchId: nonempty, connection: t.string, source: target, fixture: target, rows: t.array(reportRow) });

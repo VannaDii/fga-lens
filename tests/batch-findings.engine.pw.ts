@@ -12,6 +12,11 @@ import {
 } from "./finding-helpers";
 import { armTransport, capturedRequests, clearTraffic, postToEngine, readFixture } from "./workbench-fixtures";
 
+const savedBatches = (page: Page) => page.getByRole("region", { name: "Saved batches", exact: true });
+const selectedBatch = (page: Page) => page.getByRole("region", { name: "Selected batch", exact: true });
+const lastRun = (page: Page) => page.getByRole("region", { name: "Last run", exact: true });
+const caseGroups = (page: Page) => lastRun(page).locator("summary").filter({ hasText: /^Case \d+ · / });
+
 /** Create several authored assertions whose names and boolean values cannot identify them. */
 async function stageBatch(request: APIRequestContext, name: string) {
   const source = await policyFixture(request, name + " source");
@@ -46,11 +51,16 @@ async function batchCommand(request: APIRequestContext, batch: Batch, job: strin
     cases: batch.cases.map(({ id }) => id), revision, job });
 }
 
-/** Wait for the report in the real Batches screen and expose only assertion rows. */
+/** Wait for the report in the real Batches screen and expand its case groups. */
 async function reportRows(page: Page) {
   await page.goto("/batches");
   await expect(page.getByRole("heading", { name: "Last run", exact: true })).toBeVisible();
-  return page.getByRole("table").locator("tbody").getByRole("row");
+  await openResultCases(page);
+  return lastRun(page).getByRole("listitem");
+}
+
+async function openResultCases(page: Page) {
+  for (const summary of await caseGroups(page).all()) await summary.click();
 }
 
 /** Observe a browser preference Save started before the earlier real checkpoint receipt is released. */
@@ -62,6 +72,27 @@ function preferenceAttempt(page: Page, key: string, value: string) {
     return body?.action === "save" && body.state?.selections?.[key] === value;
   });
 }
+
+test("Batches defaults a newly selected source store to its latest installed revision", async ({ page, request }) => {
+  const { batch } = await stageBatch(request, "Newest source revision");
+  const source = await policyFixture(request, "Second source for newest revision");
+  const { authorization_model_id: latest } = await postToEngine(request, source.path + "/authorization-models",
+    transformer.transformDSLToJSONObject(baseDsl + "\n\ntype newest_source\n"));
+  await page.goto("/batches");
+  await expect(selectedBatch(page).getByRole("heading", { name: batch.name, exact: true })).toBeVisible();
+  await page.getByRole("combobox", { name: "Source store", exact: true }).selectOption(source.store);
+  const revision = page.getByRole("combobox", { name: "Source model revision", exact: true });
+  await expect(revision).toHaveValue(latest);
+  await expect(revision.locator("option:checked")).toHaveText("Version 2");
+  await revision.selectOption(source.revision);
+  await expect(revision).toHaveValue(source.revision);
+  await expect.poll(async () => {
+    const { state, endpoint } = await workspace(request);
+    return state.selections?.["batch-source-model/" + endpoint + "/" + batch.id];
+  }).toBe(source.revision);
+  await page.reload();
+  await expect(revision).toHaveValue(source.revision);
+});
 
 test("C7 source preference persists while a committed fixture receipt is delayed", async ({ page, request }) => {
   const source = await policyFixture(request, "Delayed fixture receipt");
@@ -112,7 +143,8 @@ test("C7 case preferences survive a delayed report without adding assertions to 
     selections: { ...state.selections, [key]: JSON.stringify([first.id]) },
   } });
   await page.goto("/batches");
-  const secondCase = page.getByRole("checkbox", { name: /^2\. Repeated case/ });
+  const secondCase = savedBatches(page).getByRole("checkbox", { name: "2. Repeated case", exact: true });
+  await expect(secondCase).toBeVisible();
   await expect(secondCase).not.toBeChecked();
   const held = holdAction(page, "batch", "after checkpoint", (body) => body.batchId === batch.id);
   await held.ready;
@@ -135,26 +167,62 @@ test("C7 case preferences survive a delayed report without adding assertions to 
     await expect.configure({ soft: true }).poll(async () => (await workspace(request)).state.selections?.[key], { timeout: 2000 }).toBe(expanded);
     await page.reload();
     await expect.soft(secondCase).toBeChecked({ timeout: 2000 });
-    await expect(page.getByRole("table").locator("tbody").getByRole("row")).toHaveCount(2);
+    await openResultCases(page);
+    await expect(lastRun(page).getByRole("listitem")).toHaveCount(2);
     expect((await workspace(request)).state.report).toEqual(report);
   } finally {
     held.release();
   }
 });
 
-test("F11 report distinguishes duplicate case occurrences and equal-boolean Check assertions", async ({ page, request }) => {
-  const { batch } = await stageBatch(request, "Assertion identities");
+test("F11 Batches groups case selection and assertion results, with provider details inside each result", async ({ page, request }) => {
+  const other = await stageBatch(request, "Another saved batch");
+  const { batch, fixture } = await stageBatch(request, "Assertion identities");
+  await clearTraffic(request);
   const complete = await batchCommand(request, batch, crypto.randomUUID());
   expect(complete.ok()).toBe(true);
   const receipt: WorkspaceView = await complete.json();
   expect(receipt.state.report?.rows.map((row) => row.status)).toEqual(["pass", "pass", "pass"]);
-  const rows = await reportRows(page);
+  const requests = await capturedRequests(request, fixture.path + "/check");
+  await page.goto("/batches");
+  const header = selectedBatch(page).locator("header").first();
+  await expect(header.getByRole("heading", { name: batch.name, exact: true })).toBeVisible();
+  for (const name of ["Source store", "Source model revision"]) await expect(header.getByRole("combobox", { name })).toBeVisible();
+  for (const name of ["Export", "Publish fixture", "Run selected"]) await expect(header.getByRole("button", { name })).toBeVisible();
+  await expect(selectedBatch(page).getByRole("checkbox")).toHaveCount(0);
+  const batchToggle = (name: string) => savedBatches(page).locator("summary").filter({ hasText: name });
+  await expect(savedBatches(page).getByRole("checkbox", { name: "1. Repeated case", exact: true })).toBeChecked();
+  await batchToggle(other.batch.name).click();
+  await expect(header.getByRole("heading", { name: other.batch.name, exact: true })).toBeVisible();
+  await batchToggle(batch.name).click();
+  await expect(header.getByRole("heading", { name: batch.name, exact: true })).toBeVisible();
+
+  const cases = caseGroups(page);
+  await expect(cases).toHaveCount(2);
+  await expect(cases.nth(0)).toContainText("Case 1 · Repeated case");
+  await expect(cases.nth(1)).toContainText("Case 2 · Repeated case");
+  await expect(lastRun(page).getByRole("listitem")).toHaveCount(0);
+  await openResultCases(page);
+  const rows = lastRun(page).getByRole("listitem");
   await expect(rows).toHaveCount(3);
-  await expect.soft(rows.nth(0)).toContainText("viewer", { timeout: 1600 });
-  await expect.soft(rows.nth(1)).toContainText("access", { timeout: 1600 });
-  await expect.soft(rows.nth(2)).toContainText("editor", { timeout: 1600 });
-  await expect.soft(rows.nth(0)).toContainText(/(?:case\s+1\b|1[.)]\s*Repeated case)/i, { timeout: 1600 });
-  await expect(rows.nth(2)).toContainText(/(?:case\s+2\b|2[.)]\s*Repeated case)/i, { timeout: 1600 });
+  for (const [index, relation] of ["viewer", "access", "editor"].entries()) {
+    await expect(rows.nth(index).locator("summary")).toContainText(relation);
+  }
+  const assertion = rows.first();
+  await expect(assertion.locator("summary")).toContainText(routeGrant.user);
+  await expect(assertion.locator("summary")).toContainText(routeGrant.object);
+  await expect(assertion.locator("pre").first()).toBeHidden();
+  await assertion.locator("summary").click();
+  await expect(assertion.getByText(fixture.path + "/check", { exact: true })).toBeVisible();
+  await expect(assertion.locator("pre").first()).toBeVisible();
+  expect(JSON.parse(await assertion.locator("pre").first().innerText())).toEqual(requests[0]);
+  expect(JSON.parse(await assertion.locator("pre").last().innerText())).toMatchObject({ allowed: true });
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme });
+    await page.setViewportSize({ width: 320, height: 800 });
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(321);
+    await expect(assertion.locator("pre").last()).toBeVisible();
+  }
 });
 
 test("publishing a batch again replaces a deleted fixture store", async ({ page, request }) => {
@@ -196,7 +264,8 @@ test("F11 an overwritten authored case does not shrink the last completed run", 
   } });
   await page.reload();
   await expect(page.getByRole("heading", { name: "Last run", exact: true })).toBeVisible();
-  await expect.soft(page.getByText(/Higher consistency.*pass 3/i)).toBeVisible({ timeout: 1600 });
+  await expect(lastRun(page).getByText("3 passed", { exact: true })).toBeVisible();
+  await openResultCases(page);
   await expect.soft(rows).toHaveCount(3, { timeout: 1600 });
   expect((await workspace(request)).state.report).toEqual(original);
 });

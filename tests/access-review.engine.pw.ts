@@ -147,6 +147,12 @@ async function selectReview(page: Page, subject: string, root = tide) {
   await expect(viewAs(page)).toHaveValue(subject);
 }
 
+async function expandBranches(page: Page, ...labels: string[]) {
+  for (const label of labels) {
+    await outline(page).getByRole("button", { name: "Expand " + label, exact: true }).click();
+  }
+}
+
 /** Locate the active Why summary without matching action names elsewhere on the page. */
 function why(page: Page) {
   const heading = page.getByRole("heading", { name: /^Why(?:\b|$)/i });
@@ -199,6 +205,186 @@ async function expectBatches(request: APIRequestContext, target: FixtureTarget, 
   }
 }
 
+test("Explore access filter keeps matching paths in both panes and covers every resource and link", async ({ page, request }) => {
+  const granted = "filter_probe:granted-only";
+  const denied = "filter_probe:denied-only";
+  const model = reviewModel.replace("condition placed", [
+    "type filter_probe", "  relations", "    define parent: [organization]",
+    "    define can_view: [user]", "", "condition placed",
+  ].join("\n"));
+  const target = await policyFixture(request, "Explore filter fixture", model, [
+    ...scopeTuples,
+    { user: tide, relation: "parent", object: granted },
+    { user: tide, relation: "parent", object: denied },
+    { user: editor, relation: "can_view", object: granted },
+  ]);
+  await selectTarget(page, target);
+  await startAt(page).selectOption(tide);
+
+  const tree = outline(page);
+  const filter = tree.locator("header").getByRole("group", { name: "Access filter", exact: true });
+  const mode = (name: string) => filter.getByRole("button", { name, exact: true });
+  await expect(mode("All")).toHaveAttribute("aria-pressed", "true");
+  await expect(mode("Allowed")).toBeDisabled();
+  await expect(mode("Denied")).toBeDisabled();
+  await clearTraffic(request);
+  await viewAs(page).selectOption(editor);
+  await expandBranches(page, "Tide", "Coastal", "Inland", "Islands", "Shared");
+
+  const chart = page.getByRole("region", { name: "Access chart", exact: true });
+  const chartCard = (object: string) => chart.locator(`.react-flow__node[data-id="${object}"]`);
+  await expectVerdict(resource(page, "Granted only"), "View", "Allowed");
+  await expectVerdict(resource(page, "Denied only"), "View", "Denied");
+  await expectVerdict(resource(page, launch), "Review", "Needs context");
+  const allObjects = [...scopeObjects, inverse, granted, denied].sort();
+
+  const snapshot = async (expected: string[]) => {
+    const outlineIds = () => tree.locator("[data-review-object]").evaluateAll((cards) =>
+      cards.map((card) => card.getAttribute("data-review-object")).sort());
+    const chartIds = () => chart.locator(".react-flow__node").evaluateAll((cards) =>
+      cards.map((card) => card.getAttribute("data-id")).sort());
+    await expect.poll(outlineIds).toEqual(expected);
+    await expect.poll(chartIds).toEqual(expected);
+    const links = await chart.locator(".react-flow__edge").evaluateAll((edges) =>
+      edges.map((edge) => edge.getAttribute("data-testid")).sort());
+    return { objects: await chartIds(), links };
+  };
+  const all = await snapshot(allObjects);
+  const inventory = { ...expectedPairs, [granted]: ["can_view", "parent"], [denied]: ["can_view", "parent"] };
+  const batches = await capturedBatches(request, target);
+  const checkedPairs = batches.flatMap(({ checks }) =>
+    checks.map(({ tuple_key }) => [tuple_key.object, tuple_key.relation].join("#"))).sort();
+  expect(checkedPairs).toEqual(Object.entries(inventory).flatMap(([object, relations]) =>
+    relations.map((relation) => [object, relation].join("#"))).sort());
+
+  const requests: string[] = [];
+  const capture = (record: BrowserRequest) => {
+    if (new URL(record.url()).pathname === "/api/workbench") requests.push(record.postDataJSON()?.action ?? record.method());
+  };
+  page.on("request", capture);
+  try {
+    await mode("Allowed").focus();
+    await mode("Allowed").press("Space");
+    await expect(mode("Allowed")).toHaveAttribute("aria-pressed", "true");
+    const allowed = await snapshot(allObjects.filter((object) => object !== denied && object !== inverse));
+    await expect(resource(page, "Coastal")).toHaveAttribute("data-muted", "true");
+    await expect(resource(page, "Shared")).toHaveCount(1);
+    const alternate = chart.getByTestId("rf__edge-" + JSON.stringify([inland, shared]));
+    await expect(alternate.locator(".react-flow__edge-path")).toHaveCSS("stroke-dasharray", "4px, 4px");
+    await expectVerdict(resource(page, launch), "Edit", "Allowed");
+    await expectVerdict(resource(page, launch), "View", "Denied");
+    await expect(resource(page, "Bulletin").getByText("No actions defined", { exact: true })).toBeVisible();
+
+    await mode("Denied").click();
+    const deniedView = await snapshot(allObjects.filter((object) => object !== granted));
+    await expectVerdict(resource(page, launch), "Edit", "Allowed");
+    await expectVerdict(resource(page, launch), "View", "Denied");
+    expect([...new Set([...allowed.objects, ...deniedView.objects])].sort()).toEqual(all.objects);
+    expect([...new Set([...allowed.links, ...deniedView.links])].sort()).toEqual(all.links);
+
+    await chartCard(coastal).getByRole("button", { name: "Collapse Coastal", exact: true }).click();
+    await expect(resource(page, launch)).toHaveCount(0);
+    await expect(chartCard(campaign)).toHaveCount(0);
+    await mode("All").click();
+    await expect(resource(page, launch)).toHaveCount(0);
+    await expandBranches(page, "Coastal");
+    expect(await snapshot(allObjects)).toEqual(all);
+    expect(requests).toEqual([]);
+  } finally {
+    page.off("request", capture);
+  }
+});
+
+test("Explore access filter uses the current viewer and preserves the viewport and Why as results change", async ({ page, request }) => {
+  const root = "organization:review";
+  const first = "document:first";
+  const second = "document:second";
+  const target = await policyFixture(request, "Explore filter transitions", [
+    "model", "  schema 1.1", "", "type user", "", "type organization", "",
+    "type document", "  relations", "    define parent: [organization]", "    define can_view: [user]",
+  ].join("\n"), [
+    { user: root, relation: "parent", object: first },
+    { user: root, relation: "parent", object: second },
+    { user: member, relation: "can_view", object: first },
+    { user: editor, relation: "can_view", object: second },
+  ]);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await selectTarget(page, target);
+  await startAt(page).selectOption(root);
+  const tree = outline(page);
+  const filter = tree.getByRole("group", { name: "Access filter", exact: true });
+  const mode = (name: string) => filter.getByRole("button", { name, exact: true });
+  const chart = page.getByRole("region", { name: "Access chart", exact: true });
+  const viewport = chart.locator(".react-flow__viewport");
+  const transform = () => viewport.evaluate(async (node) => {
+    for (let frame = 0; frame < 3; frame += 1) await new Promise(requestAnimationFrame);
+    return getComputedStyle(node).transform;
+  });
+
+  const old = holdAction(page, "access-review-check", "after checkpoint", ({ subject }) => subject === member);
+  const next = holdAction(page, "access-review-check", "after checkpoint", ({ subject }) => subject === editor);
+  await Promise.all([old.ready, next.ready]);
+  try {
+    const oldSent = appRequestSent(page, "access-review-check", ({ subject }) => subject === member);
+    await viewAs(page).selectOption(member);
+    const oldSettled = requestSettled(page, await oldSent);
+    await old.arrived;
+    await mode("Allowed").click();
+    await expandBranches(page, "Review");
+    await expectVerdict(resource(page, "First"), "View", "Not yet checked");
+    await expectVerdict(resource(page, "Second"), "View", "Not yet checked");
+
+    await viewAs(page).selectOption(editor);
+    await next.arrived;
+    await expect(mode("Allowed")).toHaveAttribute("aria-pressed", "true");
+    const before = await transform();
+    next.release();
+    await expectVerdict(resource(page, "Second"), "View", "Allowed");
+    await expect(resource(page, "First")).toHaveCount(0);
+    await expect(chart.locator(".react-flow__node")).toHaveCount(2);
+    expect(await transform()).toBe(before);
+    old.release();
+    await oldSettled;
+    await expect(resource(page, "First")).toHaveCount(0);
+    await expectVerdict(resource(page, "Second"), "View", "Allowed");
+  } finally {
+    old.release();
+    next.release();
+  }
+
+  await action(resource(page, "Second"), "View").click();
+  await expect(why(page)).toBeVisible();
+  await mode("Denied").click();
+  await expect(resource(page, "Second")).toHaveCount(0);
+  await expect(why(page)).toBeVisible();
+  await why(page).getByRole("button", { name: "Close Why", exact: true }).click();
+  await expect(mode("Denied")).toBeFocused();
+
+  await armTransport(request, [{ path: target.path + "/batch-check", kind: "service-error" }]);
+  await refresh(page).click();
+  await expect(mode("Denied")).toHaveAttribute("aria-pressed", "true");
+  await expectVerdict(resource(page, "First"), "View", "Check unavailable");
+  await expectVerdict(resource(page, "Second"), "View", "Check unavailable");
+  await expect(tree.getByRole("status")).toHaveText("No confirmed denied actions");
+  await refresh(page).click();
+  await expectVerdict(resource(page, "First"), "View", "Denied");
+  await expect(resource(page, "Second")).toHaveCount(0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme });
+    const groupBox = (await filter.boundingBox())!;
+    const outlineBox = (await tree.boundingBox())!;
+    expect(groupBox.x).toBeGreaterThanOrEqual(outlineBox.x);
+    expect(groupBox.x + groupBox.width).toBeLessThanOrEqual(outlineBox.x + outlineBox.width);
+    await expectContrast(mode("Denied"));
+  }
+  await viewAs(page).selectOption("");
+  await expect(mode("All")).toHaveAttribute("aria-pressed", "true");
+  await expect(mode("Denied")).toBeDisabled();
+  await expect(resource(page, "Second")).toBeVisible();
+});
+
 test("AR01 rolls up a shared descendant for both parents without duplicating scope or refetching on person change",
   async ({ page, request }) => {
     const target = await installReview(request);
@@ -217,6 +403,8 @@ test("AR01 rolls up a shared descendant for both parents without duplicating sco
     expect(realRoots).toEqual([detached, tide, unrelated].sort());
     expect(await capturedBatches(request, target)).toEqual([]);
     await selectReview(page, editor);
+    await expectBatches(request, target, editor);
+    await expandBranches(page, "Tide", "Coastal");
 
     const coastalEntry = resource(page, "Coastal");
     const inlandEntry = resource(page, "Inland");
@@ -226,7 +414,6 @@ test("AR01 rolls up a shared descendant for both parents without duplicating sco
     await expect(islandsEntry).toHaveAttribute("data-muted", "true");
     await expect(page.getByText("No access for the actions checked", { exact: true })).toHaveCount(0);
     await expectVerdict(resource(page, launch), "Edit", "Allowed");
-    await expectBatches(request, target, editor);
     const reads = await capturedRequests(request, target.path + "/read");
     expect(reads.length).toBeGreaterThanOrEqual(2);
     await expect(resource(page, "Shared")).toHaveCount(1);
@@ -283,6 +470,7 @@ test("AR02 explains the original direct grant and nested-group inheritance with 
     await expectKnownDecisions(request, target);
     await selectTarget(page, target);
     await selectReview(page, editor);
+    await expandBranches(page, "Tide", "Coastal");
     const launchEntry = resource(page, launch);
     await expectVerdict(launchEntry, "Edit", "Allowed");
     await action(launchEntry, "Edit").click();
@@ -319,6 +507,7 @@ test("AR03 distinguishes actual exclusion, missing context, valid context outcom
     await clearTraffic(request);
     await selectTarget(page, target);
     await selectReview(page, editor);
+    await expandBranches(page, "Tide", "Coastal");
     const entry = resource(page, launch);
     await expectVerdict(entry, "Publish", "Denied");
     await expectVerdict(entry, "Edit", "Allowed");
@@ -385,6 +574,15 @@ async function chartLayout(page: Page) {
   return { positions, viewport: await viewport.evaluate((element) => getComputedStyle(element).transform) };
 }
 
+function watchViewportMovement(viewport: Locator) {
+  return viewport.evaluateHandle((node) => {
+    const frames = new Set<string>();
+    const observer = new MutationObserver(() => frames.add(node.style.transform));
+    observer.observe(node, { attributes: true, attributeFilter: ["style"] });
+    return { frames, observer };
+  });
+}
+
 test("AR04 reads dynamic actions from the selected installed revision and distinguishes relationship-only cards",
   async ({ page, request }) => {
     const original = await installReview(request);
@@ -396,6 +594,7 @@ test("AR04 reads dynamic actions from the selected installed revision and distin
     });
     await selectTarget(page, original);
     await selectReview(page, editor);
+    await expandBranches(page, "Tide", "Coastal", "Inland", "Islands");
     await expectVerdict(resource(page, launch), "Edit", "Allowed");
     await expect(resource(page, "Bulletin")).toHaveAttribute("data-matches", "true");
     await expect(action(resource(page, "Bulletin"), "Edit")).toHaveCount(0);
@@ -406,6 +605,7 @@ test("AR04 reads dynamic actions from the selected installed revision and distin
     await clearTraffic(request);
     await page.getByRole("combobox", { name: "Model revision", exact: true }).selectOption(changed.revision);
     await selectReview(page, editor);
+    await expandBranches(page, "Tide", "Coastal");
     const entry = resource(page, launch);
     await expectVerdict(entry, "Update", "Allowed");
     await expect(action(entry, "Edit")).toHaveCount(0);
@@ -428,6 +628,7 @@ test("AR05 discards a real previous person's denial even if its check reply arri
     await expectKnownDecisions(request, target);
     await selectTarget(page, target);
     await startAt(page).selectOption(tide);
+    await expandBranches(page, "Tide", "Coastal");
 
     let captured: Record<string, unknown> | undefined;
     const oldCheck = holdAction(page, "access-review-check", "after checkpoint", (payload) => {
@@ -468,6 +669,7 @@ test("AR05 discards a real Why reply after another decision becomes the active i
   await expectKnownDecisions(request, target);
   await selectTarget(page, target);
   await selectReview(page, member);
+  await expandBranches(page, "Tide", "Coastal");
   const launchEntry = resource(page, launch);
   await expectVerdict(launchEntry, "View", "Allowed");
   await expectVerdict(launchEntry, "Edit", "Denied");
@@ -509,6 +711,7 @@ test("AR05 preserves the old verdict when the post-proof Check observes a remove
   expect(await engineAllows(request, target, { ...directEdit, relation: "can_edit" })).toBe(true);
   await selectTarget(page, target);
   await selectReview(page, editor);
+  await expandBranches(page, "Tide", "Coastal");
   const entry = resource(page, launch);
   await expectVerdict(entry, "Edit", "Allowed");
 
@@ -551,6 +754,7 @@ test("AR03 marks a whole provider fault unavailable, keeps valid denials distinc
     await expectKnownDecisions(request, target);
     await selectTarget(page, target);
     await startAt(page).selectOption(tide);
+    await expandBranches(page, "Tide", "Coastal", "Shared");
     await clearTraffic(request);
     await armTransport(request, [{ path: target.path + "/batch-check", kind: "service-error" }]);
     await viewAs(page).selectOption(editor);
@@ -624,6 +828,7 @@ test("AR01 roots without links remain inspectable and a vanished root clears wit
     await expectVerdict(resource(page, "Detached"), "View", "Allowed");
 
     await startAt(page).selectOption(tide);
+    await expandBranches(page, "Tide");
     await expect(resource(page, "Coastal")).toBeVisible();
     await clearTraffic(request);
     let capture: Record<string, unknown> | undefined;
@@ -673,13 +878,14 @@ test("AR01 evaluates the root when the installed model has no concrete containme
     .toEqual([{ user: editor, object: tide, relation: "can_view" }]);
 });
 
-test("AR04 shows the full hierarchy and relationship results on the chart without configuring it",
+test("AR04 shows the expanded hierarchy and relationship results on the chart without configuring it",
   async ({ page, request }) => {
     const target = await installReview(request);
     expect(await engineAllows(request, target, { user: editor, relation: "publish", object: campaign })).toBe(true);
     expect(await engineAllows(request, target, { user: editor, relation: "can_publish", object: campaign })).toBe(false);
     await selectTarget(page, target);
     await selectReview(page, editor);
+    await expandBranches(page, "Tide", "Coastal", "Inland", "Islands", "Shared");
     const chart = page.getByRole("region", { name: "Access chart", exact: true });
     const nodes = chart.locator(".react-flow__node");
     await expect(nodes).toHaveCount(scopeObjects.length + 1);
@@ -701,10 +907,15 @@ test("AR04 shows the full hierarchy and relationship results on the chart withou
     const viewport = chart.locator(".react-flow__viewport");
     const transform = () => viewport.evaluate((node) => (node as HTMLElement).style.transform);
     const centered = await transform();
+    await page.emulateMedia({ reducedMotion: "no-preference" });
     await chart.getByRole("button", { name: "Zoom In", exact: true }).click();
     await expect.poll(transform).not.toBe(centered);
+    const movement = await watchViewportMovement(viewport);
     await chart.getByRole("button", { name: "Recenter chart", exact: true }).click();
+    await expect.poll(() => movement.evaluate(({ frames }) => frames.size)).toBeGreaterThan(2);
     await expect.poll(transform).toBe(centered);
+    await movement.evaluate(({ observer }) => observer.disconnect());
+    await movement.dispose();
   });
 
 test("Explore chart and outline use the available height when the window resizes", async ({ page, request }) => {
@@ -738,6 +949,16 @@ test("Explore shares branches and focuses the chart only from the outline eye bu
   const chartViewport = chart.locator(".react-flow__viewport");
   const transform = () => chartViewport.evaluate((node) => getComputedStyle(node).transform);
 
+  const expandRoot = outline(page).getByRole("button", { name: "Expand Tide", exact: true });
+  await expect(expandRoot).toHaveAttribute("aria-expanded", "false");
+  await expect(chart.locator(".react-flow__node")).toHaveCount(1);
+  await expect(coastalEntry).toHaveCount(0);
+  await expandRoot.click();
+  await expect(coastalEntry.getByRole("button", { name: "Expand Coastal", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await expect(launchNode).toHaveCount(0);
+  await expect(launchEntry).toHaveCount(0);
+  await chart.getByRole("button", { name: "Expand Coastal", exact: true }).click();
+
   const focusLaunch = launchEntry.getByRole("button", { name: "Focus Launch on chart", exact: true });
   await expect(coastalEntry.locator("xpath=ancestor::li[1]").getByRole("button", { name: "Focus Launch on chart", exact: true })).toBeVisible();
   await chart.getByRole("button", { name: "Collapse Coastal", exact: true }).click();
@@ -755,12 +976,7 @@ test("Explore shares branches and focuses the chart only from the outline eye bu
   await expect.poll(transform).toBe(wide);
   await why(page).getByRole("button", { name: "Close Why", exact: true }).click();
   await expect(focusLaunch.locator("svg")).toBeVisible();
-  const movement = await chartViewport.evaluateHandle((viewport) => {
-    const frames = new Set<string>();
-    const observer = new MutationObserver(() => frames.add(viewport.style.transform));
-    observer.observe(viewport, { attributes: true, attributeFilter: ["style"] });
-    return { frames, observer };
-  });
+  const movement = await watchViewportMovement(chartViewport);
   await focusLaunch.click();
   await expect(launchNode.getByRole("button", { name: launch, exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect.poll(() => movement.evaluate(({ frames }) => frames.size)).toBeGreaterThan(2);
@@ -788,6 +1004,7 @@ test("Access Review opens Why next to the card and puts review metadata behind a
   const target = await installReview(request);
   await selectTarget(page, target);
   await selectReview(page, editor);
+  await expandBranches(page, "Tide", "Coastal");
   const chart = page.getByRole("region", { name: "Access chart", exact: true });
   const info = reviewInfo(page);
   const infoButton = chart.locator("header").getByRole("button", { name: "Review information", exact: true });
@@ -879,6 +1096,7 @@ test("Explore shows unavailable results for an object beyond the check service l
   ] } });
   await selectTarget(page, target);
   await selectReview(page, editor, longRoot);
+  await expandBranches(page, "A" + "a".repeat(299));
   const entry = resource(page, "A" + "a".repeat(299));
   await expectVerdict(entry, "View", "Check unavailable");
   await expect(entry.getByRole("button", { name: "Relationship parent · Check unavailable", exact: true })).toBeVisible();
@@ -896,6 +1114,7 @@ test("AR05 rejects a later real Read page and marks any retained identical revie
     expect(first.continuation_token.length).toBeGreaterThan(0);
     await selectTarget(page, target);
     await selectReview(page, editor);
+    await expandBranches(page, "Tide", "Coastal");
     const entry = resource(page, launch);
     await expectVerdict(entry, "Edit", "Allowed");
     await page.getByRole("button", { name: "Review information", exact: true }).click();
@@ -977,6 +1196,7 @@ test("AR06 persists only review preferences and restores valid selections withou
       .getByRole("link", { name: "Explore", exact: true }).click();
     await expect(page).toHaveURL(/\/explore$/);
     await selectReview(page, member);
+    await expandBranches(page, "Tide", "Coastal");
     const entry = resource(page, launch);
     await expectVerdict(entry, "View", "Allowed");
     await page.getByText("Condition context", { exact: true }).click();
@@ -999,6 +1219,8 @@ test("AR06 persists only review preferences and restores valid selections withou
     await page.reload();
     await expect(startAt(page)).toHaveValue(tide);
     await expect(viewAs(page)).toHaveValue(member);
+    await expect(outline(page).getByRole("button", { name: "Expand Tide", exact: true })).toBeVisible();
+    await expect(entry).toHaveCount(0);
     await expect(page.getByRole("combobox", { name: "Store", exact: true })).toHaveValue(target.store);
     await expect(page.getByRole("combobox", { name: "Model revision", exact: true })).toHaveValue(target.revision);
     await page.getByText("Condition context", { exact: true }).click();
@@ -1020,6 +1242,7 @@ test("AR05 discards an older condition denial for the same person, target and ac
   const target = await installReview(request);
   await selectTarget(page, target);
   await selectReview(page, editor);
+  await expandBranches(page, "Tide", "Coastal");
   const entry = resource(page, launch);
   await expectVerdict(entry, "Review", "Needs context");
   await page.getByText("Condition context", { exact: true }).click();
